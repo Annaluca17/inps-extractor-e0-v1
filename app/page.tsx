@@ -1,27 +1,15 @@
 'use client';
-import { useState, useCallback } from 'react';
-import { read, utils, writeFileXLSX } from 'xlsx';
-
-// Tipo base per le righe INPS
-export type InpsRow = Record<string, string | number | null>;
-
-// Mappa colonne E0/V1: nome nel file PASSWEB -> etichetta leggibile
-const E0V1_MAP: Record<string, string> = {
-  'Codice Fiscale': 'CF',
-  'Matricola': 'MATR',
-  'Cognome': 'COGN',
-  'Nome': 'NOME',
-  'Data Nascita': 'DT_NASC',
-  'Data Inizio': 'DT_INIZ',
-  'Data Fine': 'DT_FINE',
-  'Imponibile CTPS': 'IMP_CTPS',
-  'Contributo CTPS': 'CONTRIB_CTPS',
-  'Qualifica': 'QUALIF',
-  'Causale Variazione': 'CAUS_VARI',
-  'Tipo Rapporto': 'TIPO_RAPP',
-  'Giorni': 'GG',
-  'Ore': 'ORE',
-};
+import { useCallback, useMemo, useState } from 'react';
+import {
+  DEFAULT_COLUMNS,
+  E0V1_MAP,
+  InpsRow,
+  distinctValues,
+  distinctYears,
+  exportXlsx,
+  filterRows,
+  parseInpsWorkbook,
+} from '../lib/inps';
 
 type Step = 'upload' | 'preview' | 'export';
 
@@ -30,15 +18,15 @@ export default function Home() {
   const [rows, setRows] = useState<InpsRow[]>([]);
   const [allColumns, setAllColumns] = useState<string[]>([]);
   const [activeColumns, setActiveColumns] = useState<Set<string>>(new Set());
-  const [editedRows, setEditedRows] = useState<InpsRow[]>([]);
+  const [selectedYears, setSelectedYears] = useState<Set<number>>(new Set());
+  const [selectedTipologie, setSelectedTipologie] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
 
-  // Parsing del file XLSX con SheetJS
   const processFile = useCallback((file: File) => {
-    if (!file.name.endsWith('.xlsx')) {
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
       setError('Errore: carica solo file .xlsx');
       return;
     }
@@ -46,27 +34,23 @@ export default function Home() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = e.target?.result as ArrayBuffer;
-        // Leggi il workbook dal buffer
-        const wb = read(data, { type: 'array' });
-        const wsName = wb.SheetNames[0];
-        const ws = wb.Sheets[wsName];
-        // Converti in array di oggetti (prima riga = intestazioni)
-        const jsonRaw = utils.sheet_to_json<Record<string, any>>(ws, { defval: null });
-        if (jsonRaw.length === 0) { setError('File vuoto o non leggibile.'); return; }
-        const cols = Object.keys(jsonRaw[0]);
-        // Determina colonne attive (intersezione con mappa E0/V1)
-        const found = Object.keys(E0V1_MAP).filter(k => cols.includes(k));
-        const missing = Object.keys(E0V1_MAP).filter(k => !cols.includes(k));
-        const warn: string[] = [];
-        if (missing.length > 0) warn.push('Colonne non trovate nel file: ' + missing.join(', '));
-        setWarnings(warn);
-        setRows(jsonRaw as InpsRow[]);
-        setEditedRows(jsonRaw as InpsRow[]);
-        setAllColumns(cols);
-        setActiveColumns(new Set(found.length > 0 ? found : cols.slice(0, 14)));
+        const buffer = e.target?.result as ArrayBuffer;
+        const { rows, columns, warnings } = parseInpsWorkbook(buffer);
+        if (rows.length === 0) {
+          setError('File vuoto o intestazioni non riconosciute.');
+          return;
+        }
+        setRows(rows);
+        setAllColumns(columns);
+        const defaults = DEFAULT_COLUMNS.filter(c => columns.includes(c));
+        setActiveColumns(new Set(defaults.length > 0 ? defaults : columns.slice(0, 14)));
+        setSelectedYears(new Set());
+        setSelectedTipologie(new Set());
+        setWarnings(warnings);
+        setPage(0);
         setStep('preview');
-      } catch {
+      } catch (err) {
+        console.error(err);
         setError('Impossibile leggere il file XLSX. Verifica che non sia corrotto.');
       }
     };
@@ -85,59 +69,72 @@ export default function Home() {
   };
 
   const toggleColumn = (col: string) => {
-    const s = new Set(activeColumns);
-    s.has(col) ? s.delete(col) : s.add(col);
-    setActiveColumns(s);
-  };
-
-  const updateCell = (rowIdx: number, col: string, val: string) => {
-    const r = [...editedRows];
-    r[rowIdx] = { ...r[rowIdx], [col]: val };
-    setEditedRows(r);
-  };
-
-  // Esportazione XLSX con SheetJS
-  const handleExport = () => {
-    const cols = Array.from(activeColumns);
-    const exportData = editedRows.map(row => {
-      const obj: Record<string, any> = {};
-      cols.forEach(c => { obj[E0V1_MAP[c] || c] = row[c] ?? ''; });
-      return obj;
+    setActiveColumns(prev => {
+      const s = new Set(prev);
+      if (s.has(col)) s.delete(col); else s.add(col);
+      return s;
     });
-    const ws = utils.json_to_sheet(exportData);
-    const wb = utils.book_new();
-    utils.book_append_sheet(wb, ws, 'Quadri E0-V1');
-    writeFileXLSX(wb, 'inps-estratto-e0-v1.xlsx');
   };
 
-  const visibleCols = Array.from(activeColumns);
-  const totalPages = Math.ceil(editedRows.length / PAGE_SIZE);
-  const pagedRows = editedRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const toggleYear = (y: number) => {
+    setSelectedYears(prev => {
+      const s = new Set(prev);
+      if (s.has(y)) s.delete(y); else s.add(y);
+      return s;
+    });
+    setPage(0);
+  };
+
+  const toggleTipologia = (t: string) => {
+    setSelectedTipologie(prev => {
+      const s = new Set(prev);
+      if (s.has(t)) s.delete(t); else s.add(t);
+      return s;
+    });
+    setPage(0);
+  };
+
+  const availableYears = useMemo(() => distinctYears(rows), [rows]);
+  const availableTipologie = useMemo(() => distinctValues(rows, 'Tipologia'), [rows]);
+
+  const filteredRows = useMemo(
+    () => filterRows(rows, { years: selectedYears, tipologie: selectedTipologie }),
+    [rows, selectedYears, selectedTipologie],
+  );
+
+  const visibleCols = useMemo(
+    () => allColumns.filter(c => activeColumns.has(c)),
+    [allColumns, activeColumns],
+  );
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  const pagedRows = filteredRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  const handleExport = () => {
+    exportXlsx(filteredRows, visibleCols, 'inps-estratto-e0-v1.xlsx');
+  };
 
   return (
     <main className="max-w-7xl mx-auto p-4 md:p-8">
-      {/* HEADER */}
       <div className="mb-8 text-center">
         <h1 className="text-3xl font-bold text-blue-800">INPS Extractor — Quadri E0/V1</h1>
-        <p className="text-gray-500 mt-1">Estrazione selettiva colonne da file INPS PASSWEB · Immedia S.p.A.</p>
+        <p className="text-gray-500 mt-1">Estrazione selettiva righe e colonne da file INPS PASSWEB · Immedia S.p.A.</p>
       </div>
 
-      {/* PROGRESS BAR */}
       <div className="flex items-center justify-center gap-2 mb-8">
         {(['upload','preview','export'] as Step[]).map((s, i) => (
           <div key={s} className="flex items-center gap-2">
             <div className={`rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold ${
-              step === s ? 'bg-blue-600 text-white' : step === 'preview' && s === 'upload' || step === 'export' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'
+              step === s ? 'bg-blue-600 text-white' : (step === 'preview' && s === 'upload') || step === 'export' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'
             }`}>{i+1}</div>
             <span className={`text-sm font-medium ${ step === s ? 'text-blue-700' : 'text-gray-400'}`}>
-              {s === 'upload' ? 'Carica file' : s === 'preview' ? 'Anteprima dati' : 'Esporta XLSX'}
+              {s === 'upload' ? 'Carica file' : s === 'preview' ? 'Filtri & anteprima' : 'Esporta XLSX'}
             </span>
             {i < 2 && <span className="text-gray-300">›</span>}
           </div>
         ))}
       </div>
 
-      {/* STEP 1: UPLOAD */}
       {step === 'upload' && (
         <div
           className="border-2 border-dashed border-blue-300 rounded-2xl p-12 text-center bg-white hover:border-blue-500 transition-colors cursor-pointer"
@@ -155,7 +152,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* STEP 2: PREVIEW */}
       {step === 'preview' && (
         <div className="space-y-6">
           {warnings.length > 0 && (
@@ -165,12 +161,68 @@ export default function Home() {
             </div>
           )}
 
+          {/* Filtri righe */}
+          <div className="bg-white rounded-xl shadow p-4 space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="font-semibold text-gray-800">Filtri righe</h2>
+              <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm font-medium">
+                {filteredRows.length} righe filtrate / {rows.length} totali
+              </span>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                Anno (Data Inizio Periodo) — {selectedYears.size === 0 ? 'tutti' : `${selectedYears.size} selezionati`}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {availableYears.map(y => (
+                  <button
+                    key={y}
+                    onClick={() => toggleYear(y)}
+                    className={`px-3 py-1 rounded-full border text-sm ${
+                      selectedYears.has(y) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >{y}</button>
+                ))}
+                {selectedYears.size > 0 && (
+                  <button
+                    onClick={() => { setSelectedYears(new Set()); setPage(0); }}
+                    className="px-3 py-1 rounded-full border text-sm bg-gray-100 text-gray-600 border-gray-300"
+                  >Reset</button>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                Tipologia — {selectedTipologie.size === 0 ? 'tutte' : `${selectedTipologie.size} selezionate`}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {availableTipologie.map(t => (
+                  <button
+                    key={t}
+                    onClick={() => toggleTipologia(t)}
+                    className={`px-3 py-1 rounded-full border text-sm ${
+                      selectedTipologie.has(t) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >{t}</button>
+                ))}
+                {selectedTipologie.size > 0 && (
+                  <button
+                    onClick={() => { setSelectedTipologie(new Set()); setPage(0); }}
+                    className="px-3 py-1 rounded-full border text-sm bg-gray-100 text-gray-600 border-gray-300"
+                  >Reset</button>
+                )}
+              </div>
+            </div>
+          </div>
+
           {/* Selezione colonne */}
           <div className="bg-white rounded-xl shadow p-4">
             <div className="flex justify-between items-center mb-3">
               <h2 className="font-semibold text-gray-800">Selezione colonne</h2>
               <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
-                Selezione salvata: {activeColumns.size} colonne
+                {activeColumns.size} colonne attive / {allColumns.length} totali
               </span>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -188,9 +240,9 @@ export default function Home() {
 
           {/* Tabella dati */}
           <div className="bg-white rounded-xl shadow overflow-hidden">
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[60vh]">
               <table className="min-w-full text-sm">
-                <thead className="bg-blue-700 text-white">
+                <thead className="bg-blue-700 text-white sticky top-0">
                   <tr>
                     {visibleCols.map(col => (
                       <th key={col} className="px-3 py-2 text-left whitespace-nowrap">
@@ -204,24 +256,26 @@ export default function Home() {
                   {pagedRows.map((row, ri) => (
                     <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                       {visibleCols.map(col => (
-                        <td key={col} className="px-1 py-1 border-b border-gray-100">
-                          <input
-                            value={row[col]?.toString() ?? ''}
-                            onChange={e => updateCell(page * PAGE_SIZE + ri, col, e.target.value)}
-                            className="w-full px-2 py-1 bg-transparent focus:bg-blue-50 focus:outline-none rounded text-xs"
-                          />
+                        <td key={col} className="px-3 py-1 border-b border-gray-100 whitespace-nowrap">
+                          {row[col]?.toString() ?? ''}
                         </td>
                       ))}
                     </tr>
                   ))}
+                  {pagedRows.length === 0 && (
+                    <tr>
+                      <td colSpan={Math.max(1, visibleCols.length)} className="px-3 py-6 text-center text-gray-400">
+                        Nessuna riga corrisponde ai filtri.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
 
-            {/* Paginazione */}
             <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-t">
               <span className="text-sm text-gray-500">
-                {editedRows.length} righe totali | Pagina {page+1} di {totalPages}
+                {filteredRows.length} righe filtrate | Pagina {page+1} di {totalPages}
               </span>
               <div className="flex gap-2">
                 <button onClick={() => setPage(p => Math.max(0, p-1))} disabled={page===0}
@@ -232,14 +286,14 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Bottoni azione */}
           <div className="flex flex-wrap gap-4 justify-between">
             <button onClick={() => setStep('upload')}
               className="px-6 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100 transition-colors">
               &#8592; Cambia file
             </button>
             <button onClick={handleExport}
-              className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-semibold flex items-center gap-2 transition-colors">
+              disabled={filteredRows.length === 0 || visibleCols.length === 0}
+              className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold flex items-center gap-2 transition-colors">
               &#128229; Genera file scaricabile (.xlsx)
             </button>
           </div>
