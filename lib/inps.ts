@@ -89,16 +89,26 @@ export function parseInpsWorkbook(buffer: ArrayBuffer): ParseResult {
 
 const DATE_RE = /^(\d{2})\/(\d{2})\/(\d{4})$/;
 
-/** Ricava l'anno da una cella "Data Inizio Periodo" (formato gg/mm/aaaa). */
-export function yearOf(row: InpsRow, column = 'Data Inizio Periodo'): number | null {
+/** Ricava anno+mese da una cella "Data Inizio Periodo" (formato gg/mm/aaaa). */
+export function yearMonthOf(row: InpsRow, column = 'Data Inizio Periodo'): { year: number; month: number } | null {
   const v = row[column];
   if (v == null) return null;
   const s = String(v).trim();
   const m = s.match(DATE_RE);
-  if (m) return Number(m[3]);
-  // fallback: a volte è una stringa "2024 - Ottobre" ecc.
+  if (m) return { year: Number(m[3]), month: Number(m[2]) };
+  // fallback: stringhe come "2024 - Ottobre"
   const m2 = s.match(/(\d{4})/);
-  return m2 ? Number(m2[1]) : null;
+  if (m2) return { year: Number(m2[1]), month: 1 };
+  return null;
+}
+
+export function yearOf(row: InpsRow, column = 'Data Inizio Periodo'): number | null {
+  return yearMonthOf(row, column)?.year ?? null;
+}
+
+/** Codifica anno+mese come intero AAAA*100 + MM, comodo per confronti. */
+export function ymKey(year: number, month: number): number {
+  return year * 100 + month;
 }
 
 export function distinctYears(rows: InpsRow[], column = 'Data Inizio Periodo'): number[] {
@@ -108,6 +118,22 @@ export function distinctYears(rows: InpsRow[], column = 'Data Inizio Periodo'): 
     if (y != null) set.add(y);
   }
   return Array.from(set).sort((a, b) => b - a);
+}
+
+/** Restituisce gli anni+mese distinti presenti, ordinati dal più recente. */
+export function distinctYearMonths(rows: InpsRow[], column = 'Data Inizio Periodo'): { year: number; month: number }[] {
+  const seen = new Set<number>();
+  const out: { year: number; month: number }[] = [];
+  for (const r of rows) {
+    const ym = yearMonthOf(r, column);
+    if (!ym) continue;
+    const k = ymKey(ym.year, ym.month);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(ym);
+  }
+  out.sort((a, b) => ymKey(b.year, b.month) - ymKey(a.year, a.month));
+  return out;
 }
 
 export function distinctValues(rows: InpsRow[], column: string): string[] {
@@ -120,22 +146,39 @@ export function distinctValues(rows: InpsRow[], column: string): string[] {
   return Array.from(set).sort();
 }
 
+export interface YearMonth { year: number; month: number }
+
 export interface RowFilter {
-  years?: Set<number>;        // se vuoto/undefined → tutti
+  /** Estremo inferiore (incluso) per Data Inizio Periodo. */
+  from?: YearMonth;
+  /** Estremo superiore (incluso) per Data Inizio Periodo. */
+  to?: YearMonth;
   tipologie?: Set<string>;    // E0 / V1 — se vuoto → tutte
+  stati?: Set<string>;        // Corrente / Spento / Obsoleto — se vuoto → tutti
   yearColumn?: string;        // default 'Data Inizio Periodo'
+  statoColumn?: string;       // default 'Correnti, obsoleti, …'
 }
 
 export function filterRows(rows: InpsRow[], f: RowFilter): InpsRow[] {
   const yearCol = f.yearColumn ?? 'Data Inizio Periodo';
+  const statoCol = f.statoColumn ?? 'Correnti, obsoleti, …';
+  const fromK = f.from ? ymKey(f.from.year, f.from.month) : null;
+  const toK = f.to ? ymKey(f.to.year, f.to.month) : null;
   return rows.filter(r => {
-    if (f.years && f.years.size > 0) {
-      const y = yearOf(r, yearCol);
-      if (y == null || !f.years.has(y)) return false;
+    if (fromK != null || toK != null) {
+      const ym = yearMonthOf(r, yearCol);
+      if (!ym) return false;
+      const k = ymKey(ym.year, ym.month);
+      if (fromK != null && k < fromK) return false;
+      if (toK != null && k > toK) return false;
     }
     if (f.tipologie && f.tipologie.size > 0) {
       const t = r['Tipologia'];
       if (t == null || !f.tipologie.has(String(t))) return false;
+    }
+    if (f.stati && f.stati.size > 0) {
+      const s = r[statoCol];
+      if (s == null || !f.stati.has(String(s))) return false;
     }
     return true;
   });

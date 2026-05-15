@@ -4,12 +4,17 @@ import {
   DEFAULT_COLUMNS,
   E0V1_MAP,
   InpsRow,
+  YearMonth,
   distinctValues,
+  distinctYearMonths,
   distinctYears,
   exportXlsx,
   filterRows,
   parseInpsWorkbook,
 } from '../lib/inps';
+
+const MONTH_NAMES = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+const STATI_NOTI = ['Corrente', 'Spento', 'Obsoleto'];
 
 type Step = 'upload' | 'preview' | 'export';
 
@@ -18,8 +23,10 @@ export default function Home() {
   const [rows, setRows] = useState<InpsRow[]>([]);
   const [allColumns, setAllColumns] = useState<string[]>([]);
   const [activeColumns, setActiveColumns] = useState<Set<string>>(new Set());
-  const [selectedYears, setSelectedYears] = useState<Set<number>>(new Set());
+  const [fromYM, setFromYM] = useState<YearMonth | null>(null);
+  const [toYM, setToYM] = useState<YearMonth | null>(null);
   const [selectedTipologie, setSelectedTipologie] = useState<Set<string>>(new Set());
+  const [selectedStati, setSelectedStati] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [page, setPage] = useState(0);
@@ -44,8 +51,10 @@ export default function Home() {
         setAllColumns(columns);
         const defaults = DEFAULT_COLUMNS.filter(c => columns.includes(c));
         setActiveColumns(new Set(defaults.length > 0 ? defaults : columns.slice(0, 14)));
-        setSelectedYears(new Set());
+        setFromYM(null);
+        setToYM(null);
         setSelectedTipologie(new Set());
+        setSelectedStati(new Set());
         setWarnings(warnings);
         setPage(0);
         setStep('preview');
@@ -76,31 +85,44 @@ export default function Home() {
     });
   };
 
-  const toggleYear = (y: number) => {
-    setSelectedYears(prev => {
+  const toggleSetItem = <T,>(setter: React.Dispatch<React.SetStateAction<Set<T>>>, value: T) => {
+    setter(prev => {
       const s = new Set(prev);
-      if (s.has(y)) s.delete(y); else s.add(y);
-      return s;
-    });
-    setPage(0);
-  };
-
-  const toggleTipologia = (t: string) => {
-    setSelectedTipologie(prev => {
-      const s = new Set(prev);
-      if (s.has(t)) s.delete(t); else s.add(t);
+      if (s.has(value)) s.delete(value); else s.add(value);
       return s;
     });
     setPage(0);
   };
 
   const availableYears = useMemo(() => distinctYears(rows), [rows]);
+  const availableYearMonths = useMemo(() => distinctYearMonths(rows), [rows]);
   const availableTipologie = useMemo(() => distinctValues(rows, 'Tipologia'), [rows]);
+  const availableStati = useMemo(() => {
+    const present = distinctValues(rows, 'Correnti, obsoleti, …');
+    const presentSet = new Set(present);
+    const known = STATI_NOTI.filter(s => presentSet.has(s));
+    const extras = present.filter(s => !STATI_NOTI.includes(s));
+    return known.concat(extras);
+  }, [rows]);
 
   const filteredRows = useMemo(
-    () => filterRows(rows, { years: selectedYears, tipologie: selectedTipologie }),
-    [rows, selectedYears, selectedTipologie],
+    () => filterRows(rows, {
+      from: fromYM ?? undefined,
+      to: toYM ?? undefined,
+      tipologie: selectedTipologie,
+      stati: selectedStati,
+    }),
+    [rows, fromYM, toYM, selectedTipologie, selectedStati],
   );
+
+  const parseYmInput = (v: string): YearMonth | null => {
+    if (!v) return null;
+    const [y, m] = v.split('-').map(Number);
+    if (!y || !m) return null;
+    return { year: y, month: m };
+  };
+  const ymToInputValue = (ym: YearMonth | null): string =>
+    ym ? `${ym.year}-${String(ym.month).padStart(2, '0')}` : '';
 
   const visibleCols = useMemo(
     () => allColumns.filter(c => activeColumns.has(c)),
@@ -172,25 +194,55 @@ export default function Home() {
 
             <div>
               <p className="text-sm text-gray-600 mb-2">
-                Anno (Data Inizio Periodo) — {selectedYears.size === 0 ? 'tutti' : `${selectedYears.size} selezionati`}
+                Periodo (Data Inizio Periodo) — {fromYM || toYM ? `da ${fromYM ? `${MONTH_NAMES[fromYM.month-1]} ${fromYM.year}` : '—'} a ${toYM ? `${MONTH_NAMES[toYM.month-1]} ${toYM.year}` : '—'}` : 'tutto'}
               </p>
-              <div className="flex flex-wrap gap-2">
-                {availableYears.map(y => (
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col text-xs text-gray-500">
+                  Da (mese/anno)
+                  <input
+                    type="month"
+                    value={ymToInputValue(fromYM)}
+                    onChange={e => { setFromYM(parseYmInput(e.target.value)); setPage(0); }}
+                    className="border border-gray-300 rounded px-2 py-1 text-sm"
+                  />
+                </label>
+                <label className="flex flex-col text-xs text-gray-500">
+                  A (mese/anno)
+                  <input
+                    type="month"
+                    value={ymToInputValue(toYM)}
+                    onChange={e => { setToYM(parseYmInput(e.target.value)); setPage(0); }}
+                    className="border border-gray-300 rounded px-2 py-1 text-sm"
+                  />
+                </label>
+                {(fromYM || toYM) && (
                   <button
-                    key={y}
-                    onClick={() => toggleYear(y)}
-                    className={`px-3 py-1 rounded-full border text-sm ${
-                      selectedYears.has(y) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >{y}</button>
-                ))}
-                {selectedYears.size > 0 && (
-                  <button
-                    onClick={() => { setSelectedYears(new Set()); setPage(0); }}
+                    onClick={() => { setFromYM(null); setToYM(null); setPage(0); }}
                     className="px-3 py-1 rounded-full border text-sm bg-gray-100 text-gray-600 border-gray-300"
-                  >Reset</button>
+                  >Reset periodo</button>
                 )}
               </div>
+              {availableYears.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className="text-xs text-gray-400 self-center">Anno intero:</span>
+                  {availableYears.map(y => (
+                    <button
+                      key={y}
+                      onClick={() => { setFromYM({ year: y, month: 1 }); setToYM({ year: y, month: 12 }); setPage(0); }}
+                      className="px-2 py-1 rounded border text-xs bg-white text-gray-600 border-gray-300 hover:bg-gray-50"
+                    >{y}</button>
+                  ))}
+                  {availableYearMonths.length > 0 && (
+                    <button
+                      onClick={() => {
+                        const last = availableYearMonths[0];
+                        setFromYM(last); setToYM(null); setPage(0);
+                      }}
+                      className="px-2 py-1 rounded border text-xs bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+                    >Da ultimo mese lavorato ({MONTH_NAMES[availableYearMonths[0].month-1]} {availableYearMonths[0].year})</button>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
@@ -201,7 +253,7 @@ export default function Home() {
                 {availableTipologie.map(t => (
                   <button
                     key={t}
-                    onClick={() => toggleTipologia(t)}
+                    onClick={() => toggleSetItem(setSelectedTipologie, t)}
                     className={`px-3 py-1 rounded-full border text-sm ${
                       selectedTipologie.has(t) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
                     }`}
@@ -210,6 +262,29 @@ export default function Home() {
                 {selectedTipologie.size > 0 && (
                   <button
                     onClick={() => { setSelectedTipologie(new Set()); setPage(0); }}
+                    className="px-3 py-1 rounded-full border text-sm bg-gray-100 text-gray-600 border-gray-300"
+                  >Reset</button>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                Stato — {selectedStati.size === 0 ? 'tutti' : `${selectedStati.size} selezionati`}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {availableStati.map(s => (
+                  <button
+                    key={s}
+                    onClick={() => toggleSetItem(setSelectedStati, s)}
+                    className={`px-3 py-1 rounded-full border text-sm ${
+                      selectedStati.has(s) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >{s}</button>
+                ))}
+                {selectedStati.size > 0 && (
+                  <button
+                    onClick={() => { setSelectedStati(new Set()); setPage(0); }}
                     className="px-3 py-1 rounded-full border text-sm bg-gray-100 text-gray-600 border-gray-300"
                   >Reset</button>
                 )}
