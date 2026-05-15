@@ -4,13 +4,16 @@ import {
   DEFAULT_COLUMNS,
   E0V1_MAP,
   InpsRow,
+  SUBTOTAL_COLUMNS,
   YearMonth,
   distinctValues,
   distinctYearMonths,
   distinctYears,
-  exportXlsx,
+  exportXlsxGrouped,
   filterRows,
+  groupByYearWithSubtotals,
   parseInpsWorkbook,
+  yearOf,
 } from '../lib/inps';
 
 const MONTH_NAMES = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
@@ -27,6 +30,7 @@ export default function Home() {
   const [toYM, setToYM] = useState<YearMonth | null>(null);
   const [selectedTipologie, setSelectedTipologie] = useState<Set<string>>(new Set());
   const [selectedStati, setSelectedStati] = useState<Set<string>>(new Set());
+  const [groupByYearMode, setGroupByYearMode] = useState<'auto' | 'on' | 'off'>('auto');
   const [error, setError] = useState<string>('');
   const [warnings, setWarnings] = useState<string[]>([]);
   const [page, setPage] = useState(0);
@@ -129,11 +133,35 @@ export default function Home() {
     [allColumns, activeColumns],
   );
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
-  const pagedRows = filteredRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const distinctYearsInFiltered = useMemo(() => {
+    const s = new Set<number>();
+    for (const r of filteredRows) { const y = yearOf(r); if (y != null) s.add(y); }
+    return s.size;
+  }, [filteredRows]);
+
+  const groupingActive = groupByYearMode === 'on'
+    || (groupByYearMode === 'auto' && distinctYearsInFiltered >= 2);
+
+  const subtotalColsInUse = useMemo(
+    () => SUBTOTAL_COLUMNS.filter(c => visibleCols.includes(c)),
+    [visibleCols],
+  );
+
+  const displayedRows = useMemo(
+    () => groupingActive
+      ? groupByYearWithSubtotals(filteredRows, visibleCols)
+      : filteredRows.map(r => ({ kind: 'data' as const, row: r })),
+    [groupingActive, filteredRows, visibleCols],
+  );
+
+  const totalPages = Math.max(1, Math.ceil(displayedRows.length / PAGE_SIZE));
+  const pagedRows = displayedRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   const handleExport = () => {
-    exportXlsx(filteredRows, visibleCols, 'inps-estratto-e0-v1.xlsx');
+    const grouped = groupingActive
+      ? groupByYearWithSubtotals(filteredRows, visibleCols)
+      : filteredRows.map(r => ({ kind: 'data' as const, row: r }));
+    exportXlsxGrouped(grouped, visibleCols, 'inps-estratto-e0-v1.xlsx');
   };
 
   return (
@@ -290,6 +318,30 @@ export default function Home() {
                 )}
               </div>
             </div>
+
+            <div>
+              <p className="text-sm text-gray-600 mb-2">
+                Raggruppamento per anno (Data Inizio Periodo) con subtotali —{' '}
+                {groupingActive ? 'attivo' : 'disattivo'}
+                {groupingActive && subtotalColsInUse.length > 0 && (
+                  <span className="text-gray-400"> · somma: {subtotalColsInUse.join(', ')}</span>
+                )}
+                {groupingActive && subtotalColsInUse.length === 0 && (
+                  <span className="text-amber-600"> · nessuna colonna sommabile tra quelle attive</span>
+                )}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {(['auto','on','off'] as const).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => { setGroupByYearMode(m); setPage(0); }}
+                    className={`px-3 py-1 rounded-full border text-sm ${
+                      groupByYearMode === m ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >{m === 'auto' ? `Auto (≥2 anni: ${distinctYearsInFiltered} presenti)` : m === 'on' ? 'Sempre' : 'Mai'}</button>
+                ))}
+              </div>
+            </div>
           </div>
 
           {/* Selezione colonne */}
@@ -328,15 +380,21 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedRows.map((row, ri) => (
-                    <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      {visibleCols.map(col => (
-                        <td key={col} className="px-3 py-1 border-b border-gray-100 whitespace-nowrap">
-                          {row[col]?.toString() ?? ''}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {pagedRows.map((entry, ri) => {
+                    const isSub = entry.kind === 'subtotal';
+                    const rowCls = isSub
+                      ? 'bg-amber-50 font-semibold border-t-2 border-amber-300'
+                      : (ri % 2 === 0 ? 'bg-white' : 'bg-gray-50');
+                    return (
+                      <tr key={ri} className={rowCls}>
+                        {visibleCols.map(col => (
+                          <td key={col} className="px-3 py-1 border-b border-gray-100 whitespace-nowrap">
+                            {entry.row[col]?.toString() ?? ''}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
                   {pagedRows.length === 0 && (
                     <tr>
                       <td colSpan={Math.max(1, visibleCols.length)} className="px-3 py-6 text-center text-gray-400">
@@ -350,7 +408,7 @@ export default function Home() {
 
             <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-t">
               <span className="text-sm text-gray-500">
-                {filteredRows.length} righe filtrate | Pagina {page+1} di {totalPages}
+                {filteredRows.length} righe filtrate{groupingActive ? ` + ${displayedRows.length - filteredRows.length} subtotali` : ''} | Pagina {page+1} di {totalPages}
               </span>
               <div className="flex gap-2">
                 <button onClick={() => setPage(p => Math.max(0, p-1))} disabled={page===0}

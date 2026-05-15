@@ -198,3 +198,92 @@ export function exportXlsx(rows: InpsRow[], columns: string[], filename: string)
   utils.book_append_sheet(wb, ws, 'Quadri E0-V1');
   writeFileXLSX(wb, filename);
 }
+
+/** Colonne sommate nei subtotali per anno (se selezionate). */
+export const SUBTOTAL_COLUMNS: string[] = [
+  'Imponibile',
+  'Totale Contributi',
+  'Imponibile TFS',
+  'Imponibile TFR',
+  'Imponibile TFR Accordo Quadro',
+  'Contributo TFR Accordo Quadro',
+  'Contributo TFR',
+  'Contributo TFS',
+  'Contributo Credito',
+];
+
+export interface GroupedRow {
+  kind: 'data' | 'subtotal';
+  year?: number;     // valorizzato per le righe di subtotale
+  row: InpsRow;
+}
+
+function toNumber(v: string | number | null): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (s === '') return null;
+    const n = Number(s.replace(',', '.'));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Divide le righe per anno (Data Inizio Periodo) e inserisce una riga di
+ * subtotale dopo ogni gruppo. I subtotali sommano solo le colonne presenti
+ * sia in SUBTOTAL_COLUMNS sia in `columns` (colonne attive nell'export).
+ * Le righe con anno non determinabile finiscono in coda senza subtotale.
+ */
+export function groupByYearWithSubtotals(rows: InpsRow[], columns: string[]): GroupedRow[] {
+  const groups = new Map<number, InpsRow[]>();
+  const noYear: InpsRow[] = [];
+  for (const r of rows) {
+    const y = yearOf(r);
+    if (y == null) { noYear.push(r); continue; }
+    let arr = groups.get(y);
+    if (!arr) { arr = []; groups.set(y, arr); }
+    arr.push(r);
+  }
+  const years = Array.from(groups.keys()).sort((a, b) => a - b);
+  const labelCol = columns.includes('Data Inizio Periodo')
+    ? 'Data Inizio Periodo'
+    : (columns[0] ?? 'Subtotale');
+  const sumCols = SUBTOTAL_COLUMNS.filter(c => columns.includes(c));
+
+  const out: GroupedRow[] = [];
+  for (const y of years) {
+    const yearRows = groups.get(y)!;
+    for (const r of yearRows) out.push({ kind: 'data', row: r });
+    const sub: InpsRow = {};
+    for (const c of columns) sub[c] = null;
+    sub[labelCol] = `Subtotale ${y}`;
+    for (const c of sumCols) {
+      let sum = 0;
+      let any = false;
+      for (const r of yearRows) {
+        const n = toNumber(r[c]);
+        if (n != null) { sum += n; any = true; }
+      }
+      sub[c] = any ? Math.round(sum * 100) / 100 : null;
+    }
+    out.push({ kind: 'subtotal', year: y, row: sub });
+  }
+  for (const r of noYear) out.push({ kind: 'data', row: r });
+  return out;
+}
+
+export function exportXlsxGrouped(grouped: GroupedRow[], columns: string[], filename: string) {
+  const data = grouped.map(g => {
+    const obj: Record<string, string | number | null> = {};
+    for (const c of columns) {
+      const label = E0V1_MAP[c] ? `${E0V1_MAP[c]} (${c})` : c;
+      obj[label] = g.row[c] ?? '';
+    }
+    return obj;
+  });
+  const ws = utils.json_to_sheet(data);
+  const wb = utils.book_new();
+  utils.book_append_sheet(wb, ws, 'Quadri E0-V1');
+  writeFileXLSX(wb, filename);
+}
