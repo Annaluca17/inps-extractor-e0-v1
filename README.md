@@ -35,11 +35,31 @@ va messo in whitelist o va reso disponibile un mirror interno del tarball.
 
 ## Sezioni
 
-- **Quadri E0/V1** — filtri per periodo, tipologia e stato; selezione colonne;
-  subtotali per anno; export XLSX.
+- **Quadri E0/V1** — filtri per periodo, tipologia e stato; ordinamento per
+  Data Inizio/Fine Periodo; selezione colonne; subtotali per anno; export XLSX.
 - **Sgravi contributivi** — riepilogo del foglio "Elenco Sgravi" per codice e per
   anno di competenza, con dettaglio mensile ed export su tre fogli
   (per codice, per anno, dettaglio righe).
+
+## Il file esportato
+
+- **Ordinamento** per Data Inizio Periodo e, a parità, Data Fine Periodo.
+  Decrescente per impostazione predefinita; commutabile dall'interfaccia.
+  L'ordinamento è stabile e le righe con data non interpretabile finiscono in
+  coda in entrambe le direzioni, per non mescolarsi ai dati validi.
+- **Colonna `Riga`** in testa, con il numero di riga del file INPS di origine:
+  permette di risalire alla riga sorgente di qualunque valore.
+- **Filtro automatico** sulla riga di intestazione.
+- **Subtotali come formula** `SUBTOTAL(9;intervallo)`. Aggiungendo o togliendo
+  righe in Excel i totali si aggiornano; le righe nascoste dal filtro non
+  vengono conteggiate e i subtotali annidati non sono contati due volte.
+  Disattivabile per ottenere valori fissi.
+
+Due conseguenze da conoscere. Il raggruppamento per anno segue l'ordinamento e
+crea un subtotale al termine di ogni blocco contiguo: è ciò che rende gli
+intervalli delle formule validi. E le celle con formula sono scritte senza
+valore in cache — Excel e LibreOffice ricalcolano all'apertura, ma anteprime e
+visualizzatori che non ricalcolano possono mostrarle vuote.
 
 ## Integrità dei dati
 
@@ -67,9 +87,14 @@ l'input, che nessuna riga sia duplicata, estranea o fuori ordine. L'interfaccia
 mostra sempre `tenute + escluse = righe nel foglio` e un registro consultabile
 delle esclusioni.
 
-**3. L'export viene riletto.** `assertRoundTrip` rilegge il foglio appena
+**3. Riordinare non è modificare.** `sortByPeriod` passa da
+`assertPermutation`: stesse righe, stessi oggetti, nessuna persa o duplicata.
+Filtro e ordinamento restano due passi distinti — il filtro non può riordinare,
+l'ordinamento non può aggiungere o togliere righe.
+
+**4. L'export viene riletto.** `assertSheetMatches` rilegge il foglio appena
 costruito e lo confronta cella per cella con la matrice sorgente, prima di
-scrivere il file.
+scrivere il file. Per le celle con formula confronta la formula, non il valore.
 
 Se un'invariante salta viene lanciato `IntegrityError`: l'app mostra l'errore e
 blocca l'export, invece di produrre un file plausibile ma sbagliato.
