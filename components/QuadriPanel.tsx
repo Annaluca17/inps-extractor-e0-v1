@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import {
   type ExportRow,
   type SheetData,
+  type SortDirection,
   type YearMonth,
   DEFAULT_COLUMNS,
   E0V1_MAP,
@@ -19,6 +20,7 @@ import {
   formatYearMonth,
   groupByYearWithSubtotals,
   resolveQuadriColumns,
+  sortByPeriod,
   textOf,
   yearMonthOfRow,
 } from '../lib/inps';
@@ -39,6 +41,9 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const [selectedTipologie, setSelectedTipologie] = useState<Set<string>>(new Set());
   const [selectedStati, setSelectedStati] = useState<Set<string>>(new Set());
   const [groupMode, setGroupMode] = useState<'auto' | 'on' | 'off'>('auto');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [subtotalsAsFormula, setSubtotalsAsFormula] = useState(true);
+  const [includeRowId, setIncludeRowId] = useState(true);
   const [showExcluded, setShowExcluded] = useState(false);
   const [page, setPage] = useState(0);
 
@@ -63,8 +68,15 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   }, [sheet, cols, fromYM, toYM, selectedTipologie, selectedStati]);
 
   // Memoizzati: un array nuovo a ogni render invaliderebbe i useMemo a valle.
-  const keptRows = useMemo(() => (filtered.ok ? filtered.value.kept : []), [filtered]);
+  const filteredRows = useMemo(() => (filtered.ok ? filtered.value.kept : []), [filtered]);
   const excluded = useMemo(() => (filtered.ok ? filtered.value.excluded : []), [filtered]);
+
+  // Ordinamento per Data Inizio, poi Data Fine. Passo separato dal filtro:
+  // il filtro non può riordinare, il sort non può aggiungere o togliere righe.
+  const keptRows = useMemo(
+    () => sortByPeriod(filteredRows, cols.data, cols.dataFine, sortDirection),
+    [filteredRows, cols, sortDirection],
+  );
 
   const visibleCols = useMemo(
     () => sheet.columns.filter(c => activeColumns.has(c)),
@@ -124,7 +136,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const handleExport = () => {
     setExportError('');
     try {
-      exportQuadri(entries, visibleCols, 'inps-estratto-e0-v1.xlsx');
+      exportQuadri(entries, visibleCols, 'inps-estratto-e0-v1.xlsx', { includeRowId, subtotalsAsFormula });
     } catch (err) {
       setExportError(err instanceof IntegrityError
         ? `Export bloccato dal controllo di integrità: ${err.message}`
@@ -272,6 +284,19 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               </div>
             </div>
           )}
+
+          <div>
+            <p className="text-sm text-gray-600 mb-2">
+              Ordinamento — Data Inizio Periodo, poi Data Fine Periodo
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {([['desc', 'Decrescente (dal più recente)'], ['asc', 'Crescente (dal più vecchio)']] as [SortDirection, string][]).map(([d, label]) => (
+                <Chip key={d} active={sortDirection === d} onClick={() => { setSortDirection(d); setPage(0); }}>
+                  {label}
+                </Chip>
+              ))}
+            </div>
+          </div>
 
           <div>
             <p className="text-sm text-gray-600 mb-2">
@@ -441,16 +466,38 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
         </div>
       </div>
 
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={handleExport}
-          disabled={keptRows.length === 0 || visibleCols.length === 0 || Boolean(integrityError)}
-          className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
-        >
-          &#128229; Genera file scaricabile (.xlsx)
-        </button>
-      </div>
+      <Card title="Opzioni di export">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="space-y-2 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={includeRowId} onChange={() => setIncludeRowId(v => !v)} />
+              <span>
+                Colonna <span className="font-semibold">Riga</span> con il numero di riga del file INPS
+              </span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={subtotalsAsFormula} onChange={() => setSubtotalsAsFormula(v => !v)} />
+              <span>
+                Subtotali come <span className="font-mono text-xs bg-gray-100 px-1 rounded">SUBTOTAL(9;…)</span>{' '}
+                invece che come valore fisso
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 max-w-xl">
+              Il foglio esportato ha sempre il filtro automatico sulla riga di intestazione. Con i subtotali come
+              formula, aggiungendo o togliendo righe in Excel i totali si aggiornano da soli, e le righe nascoste
+              dal filtro non vengono conteggiate.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={keptRows.length === 0 || visibleCols.length === 0 || Boolean(integrityError)}
+            className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
+          >
+            &#128229; Genera file scaricabile (.xlsx)
+          </button>
+        </div>
+      </Card>
     </div>
   );
 }
