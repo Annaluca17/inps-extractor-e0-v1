@@ -16,7 +16,7 @@
  * Se un'invariante salta l'app lancia `IntegrityError` e si ferma: meglio un
  * errore visibile che un file di export silenziosamente sbagliato.
  */
-import { read, utils, writeFileXLSX, type WorkSheet } from 'xlsx';
+import { read, utils, writeFileXLSX, type WorkBook, type WorkSheet } from 'xlsx';
 
 export type Cell = string | number | null;
 
@@ -188,20 +188,25 @@ const DMY_RE = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/;
 const YMD_RE = /^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/;
 const YEAR_MONTH_NAME_RE = /^(\d{4})\s*[-–]?\s*([A-Za-zàèéìòù]+)$/;
 
-/** Seriale Excel → anno/mese. Epoca 1899-12-30 (sistema 1900 con il bug del 1900). */
-function fromExcelSerial(serial: number): YearMonth | null {
+/** Data completa. `day` vale 1 per i formati che indicano solo anno e mese. */
+export interface DateParts extends YearMonth {
+  day: number;
+}
+
+/** Seriale Excel → data. Epoca 1899-12-30 (sistema 1900 con il bug del 1900). */
+function fromExcelSerial(serial: number): DateParts | null {
   if (!Number.isFinite(serial) || serial <= 0) return null;
   const ms = Math.round(serial) * 86400000;
   const d = new Date(Date.UTC(1899, 11, 30) + ms);
   if (Number.isNaN(d.getTime())) return null;
-  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
 /**
- * Estrae anno/mese da una cella data. Gestisce gg/mm/aaaa, aaaa-mm-gg,
+ * Estrae la data da una cella. Gestisce gg/mm/aaaa, aaaa-mm-gg,
  * "2024 - Ottobre", "2014-Settembre", oggetti Date e seriali Excel.
  */
-export function parseYearMonth(v: Cell): YearMonth | null {
+export function parseDate(v: Cell): DateParts | null {
   if (v == null) return null;
   if (typeof v === 'number') return fromExcelSerial(v);
   const s = String(v).trim();
@@ -209,21 +214,23 @@ export function parseYearMonth(v: Cell): YearMonth | null {
 
   const dmy = s.match(DMY_RE);
   if (dmy) {
+    const day = Number(dmy[1]);
     const month = Number(dmy[2]);
     const year = Number(dmy[3]);
-    if (month >= 1 && month <= 12) return { year, month };
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return { year, month, day };
   }
 
   const ymd = s.match(YMD_RE);
   if (ymd) {
     const month = Number(ymd[2]);
-    if (month >= 1 && month <= 12) return { year: Number(ymd[1]), month };
+    const day = Number(ymd[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return { year: Number(ymd[1]), month, day };
   }
 
   const named = s.match(YEAR_MONTH_NAME_RE);
   if (named) {
     const month = MONTH_INDEX[named[2].toLowerCase()];
-    if (month) return { year: Number(named[1]), month };
+    if (month) return { year: Number(named[1]), month, day: 1 };
   }
 
   if (/^\d+(\.\d+)?$/.test(s)) {
@@ -234,8 +241,18 @@ export function parseYearMonth(v: Cell): YearMonth | null {
   return null;
 }
 
+export function parseYearMonth(v: Cell): YearMonth | null {
+  const d = parseDate(v);
+  return d ? { year: d.year, month: d.month } : null;
+}
+
 export function ymKey(ym: YearMonth): number {
   return ym.year * 100 + ym.month;
+}
+
+/** Chiave ordinabile aaaammgg. */
+export function dateKey(d: DateParts): number {
+  return d.year * 10000 + d.month * 100 + d.day;
 }
 
 export function formatYearMonth(ym: YearMonth): string {
@@ -476,6 +493,76 @@ export function partitionRows(
 }
 
 // ---------------------------------------------------------------------------
+// Ordinamento — con invariante di permutazione
+// ---------------------------------------------------------------------------
+
+export type SortDirection = 'desc' | 'asc';
+
+/**
+ * Un riordino deve essere una permutazione: stesse righe, stessi oggetti,
+ * nessuna persa, nessuna duplicata. Vale per il sort la stessa regola del
+ * filtro — cambia l'ordine, mai il contenuto.
+ */
+export function assertPermutation(input: readonly InpsRow[], output: readonly InpsRow[]): void {
+  if (input.length !== output.length) {
+    throw new IntegrityError(
+      `Ordinamento: ${input.length} righe in ingresso, ${output.length} in uscita.`,
+    );
+  }
+  const source = new Set<InpsRow>(input);
+  const seen = new Set<number>();
+  for (const row of output) {
+    if (!source.has(row)) {
+      throw new IntegrityError(`Ordinamento: riga ${row.__id} estranea all'insieme di partenza.`);
+    }
+    if (seen.has(row.__id)) {
+      throw new IntegrityError(`Ordinamento: riga ${row.__id} duplicata.`);
+    }
+    seen.add(row.__id);
+  }
+}
+
+/**
+ * Ordina per Data Inizio Periodo e, a parità, per Data Fine Periodo.
+ * Le righe con data inizio non interpretabile finiscono sempre in coda,
+ * qualunque sia la direzione, così non si mescolano ai dati validi.
+ * L'ordinamento è stabile: a parità di chiave resta l'ordine del file.
+ */
+export function sortByPeriod(
+  rows: readonly InpsRow[],
+  startColumn: string | null,
+  endColumn: string | null,
+  direction: SortDirection,
+): InpsRow[] {
+  const sign = direction === 'desc' ? -1 : 1;
+  const decorated = rows.map((row, index) => {
+    const start = parseDate(cellOf(row, startColumn));
+    const end = parseDate(cellOf(row, endColumn));
+    return {
+      row,
+      index,
+      start: start ? dateKey(start) : null,
+      end: end ? dateKey(end) : null,
+    };
+  });
+
+  decorated.sort((a, b) => {
+    if (a.start == null && b.start == null) return a.index - b.index;
+    if (a.start == null) return 1;
+    if (b.start == null) return -1;
+    if (a.start !== b.start) return sign * (a.start - b.start);
+    const ae = a.end ?? 0;
+    const be = b.end ?? 0;
+    if (ae !== be) return sign * (ae - be);
+    return a.index - b.index;
+  });
+
+  const out = decorated.map(d => d.row);
+  assertPermutation(rows, out);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Filtri sui quadri
 // ---------------------------------------------------------------------------
 
@@ -488,6 +575,7 @@ export interface QuadriFilter {
 
 export interface QuadriColumns {
   data: string | null;
+  dataFine: string | null;
   tipologia: string | null;
   stato: string | null;
   cessazione: string | null;
@@ -496,6 +584,7 @@ export interface QuadriColumns {
 export function resolveQuadriColumns(columns: readonly string[]): QuadriColumns {
   return {
     data: resolveColumn(columns, COL_DATA_INIZIO),
+    dataFine: resolveColumn(columns, COL_DATA_FINE),
     tipologia: resolveColumn(columns, COL_TIPOLOGIA),
     stato: resolveColumn(columns, COL_STATO),
     cessazione: resolveColumn(columns, COL_CESSAZIONE),
@@ -621,45 +710,39 @@ export interface ExportRow {
 }
 
 /**
- * Inserisce una riga di subtotale dopo ogni anno. Le righe dati restano gli
- * stessi oggetti dell'input, nello stesso ordine relativo: `assertDataRowsIntact`
- * lo verifica prima di restituire il risultato.
+ * Inserisce una riga di subtotale al termine di ogni blocco contiguo di righe
+ * dello stesso anno. NON riordina: rispetta l'ordine ricevuto, che è quello
+ * deciso da `sortByPeriod`. Grazie a questo ogni blocco è contiguo anche nel
+ * foglio finale, condizione necessaria perché i subtotali possano essere
+ * formule su un intervallo.
+ *
+ * Le righe dati restano gli stessi oggetti dell'input, nello stesso ordine:
+ * `assertDataRowsIntact` lo verifica prima di restituire il risultato.
  */
 export function groupByYearWithSubtotals(
   rows: readonly InpsRow[],
   columns: readonly string[],
   dateColumn: string | null,
 ): ExportRow[] {
-  const groups = new Map<number, InpsRow[]>();
-  const undated: InpsRow[] = [];
-
-  for (const row of rows) {
-    const ym = yearMonthOfRow(row, dateColumn);
-    if (!ym) {
-      undated.push(row);
-      continue;
-    }
-    const arr = groups.get(ym.year);
-    if (arr) arr.push(row);
-    else groups.set(ym.year, [row]);
-  }
-
   const labelCol = (dateColumn && columns.includes(dateColumn)) ? dateColumn : (columns[0] ?? null);
   const sumCols = SUBTOTAL_COLUMNS.filter(c => columns.includes(c));
-  const years = Array.from(groups.keys()).sort((a, b) => a - b);
-
   const out: ExportRow[] = [];
-  for (const year of years) {
-    const yearRows = groups.get(year)!;
-    for (const row of yearRows) out.push({ kind: 'data', row });
 
+  let runYear: number | null = null;
+  let runRows: InpsRow[] = [];
+
+  const closeRun = () => {
+    if (runYear == null || runRows.length === 0) {
+      runRows = [];
+      return;
+    }
     const values: Record<string, Cell> = {};
     for (const c of columns) values[c] = null;
-    if (labelCol) values[labelCol] = `Subtotale ${year}`;
+    if (labelCol) values[labelCol] = `Subtotale ${runYear}`;
     for (const c of sumCols) {
       let sum = 0;
       let any = false;
-      for (const row of yearRows) {
+      for (const row of runRows) {
         const n = numberOf(row, c);
         if (n != null) {
           sum += n;
@@ -668,9 +751,21 @@ export function groupByYearWithSubtotals(
       }
       values[c] = any ? Math.round(sum * 100) / 100 : null;
     }
-    out.push({ kind: 'subtotal', year, values });
+    out.push({ kind: 'subtotal', year: runYear, values });
+    runRows = [];
+  };
+
+  for (const row of rows) {
+    const ym = yearMonthOfRow(row, dateColumn);
+    const year = ym ? ym.year : null;
+    if (year !== runYear) {
+      closeRun();
+      runYear = year;
+    }
+    out.push({ kind: 'data', row });
+    if (year != null) runRows.push(row);
   }
-  for (const row of undated) out.push({ kind: 'data', row });
+  closeRun();
 
   assertDataRowsIntact(rows, out);
   return out;
@@ -702,77 +797,204 @@ export function flattenRows(rows: readonly InpsRow[]): ExportRow[] {
 }
 
 // ---------------------------------------------------------------------------
-// Export XLSX — con verifica di round-trip
+// Export XLSX — formule, filtro automatico, verifica cella per cella
 // ---------------------------------------------------------------------------
+
+/** Cella con formula Excel. La formula si scrive senza "=" e con la virgola come separatore. */
+export interface FormulaCell {
+  t: 'n';
+  f: string;
+}
+
+export type ExportValue = Cell | FormulaCell;
+
+export function isFormulaCell(v: ExportValue): v is FormulaCell {
+  return typeof v === 'object' && v !== null && typeof (v as FormulaCell).f === 'string';
+}
 
 export interface SheetSpec {
   name: string;
-  matrix: Cell[][];
+  matrix: ExportValue[][];
+  /** Filtro automatico sulla riga di intestazione. Attivo se non specificato. */
+  autoFilter?: boolean;
 }
+
+/** Intestazione della colonna con il numero di riga del file INPS di origine. */
+export const ROW_ID_HEADER = 'Riga';
 
 export function columnLabel(column: string): string {
   const short = E0V1_MAP[column];
   return short ? `${short} (${column})` : column;
 }
 
-/** Costruisce la matrice di export: intestazioni + una riga per ogni ExportRow. */
-export function buildExportMatrix(entries: readonly ExportRow[], columns: readonly string[]): Cell[][] {
-  const matrix: Cell[][] = [columns.map(columnLabel)];
+export interface ExportOptions {
+  /** Antepone la colonna "Riga" con il numero di riga del file INPS. Default: sì. */
+  includeRowId?: boolean;
+  /**
+   * Scrive i subtotali come formula SUBTOTAL(9;intervallo) invece che come
+   * valore fisso, così restano corretti se in Excel si aggiungono o tolgono
+   * righe. SUBTOTAL ignora anche le righe nascoste dal filtro automatico e
+   * non conteggia due volte i subtotali annidati. Default: sì.
+   */
+  subtotalsAsFormula?: boolean;
+}
+
+/**
+ * Costruisce la matrice di export: intestazioni + una riga per ogni ExportRow.
+ * I subtotali diventano formule sull'intervallo delle righe dati che li
+ * precedono — intervallo che è contiguo perché `groupByYearWithSubtotals`
+ * rispetta l'ordinamento senza rimescolare le righe.
+ */
+export function buildExportMatrix(
+  entries: readonly ExportRow[],
+  columns: readonly string[],
+  options: ExportOptions = {},
+): ExportValue[][] {
+  const includeRowId = options.includeRowId !== false;
+  const asFormula = options.subtotalsAsFormula !== false;
+  const offset = includeRowId ? 1 : 0;
+
+  const header: ExportValue[] = columns.map(columnLabel);
+  if (includeRowId) header.unshift(ROW_ID_HEADER);
+  const matrix: ExportValue[][] = [header];
+
+  // Riga Excel (1-based) della prima riga dati del blocco corrente.
+  let runStart: number | null = null;
+  let runEnd: number | null = null;
+
   for (const entry of entries) {
+    const excelRow = matrix.length + 1;
+
     if (entry.kind === 'subtotal') {
       const values = entry.values ?? {};
-      matrix.push(columns.map(c => values[c] ?? ''));
-    } else {
-      const row = entry.row!;
-      matrix.push(columns.map(c => cellOf(row, c) ?? ''));
+      const line: ExportValue[] = columns.map((c, i) => {
+        const value = values[c] ?? '';
+        if (!asFormula || value === '' || runStart == null || runEnd == null) return value;
+        // Solo le colonne effettivamente sommate diventano formula.
+        if (typeof value !== 'number') return value;
+        const col = utils.encode_col(i + offset);
+        return { t: 'n', f: `SUBTOTAL(9,${col}${runStart}:${col}${runEnd})` } as FormulaCell;
+      });
+      if (includeRowId) line.unshift('');
+      matrix.push(line);
+      runStart = null;
+      runEnd = null;
+      continue;
     }
+
+    const row = entry.row!;
+    const line: ExportValue[] = columns.map(c => cellOf(row, c) ?? '');
+    if (includeRowId) line.unshift(row.__id);
+    matrix.push(line);
+    if (runStart == null) runStart = excelRow;
+    runEnd = excelRow;
   }
+
   return matrix;
 }
 
 /**
- * Rilegge il foglio appena costruito e lo confronta con la matrice sorgente.
- * Verifica direttamente ciò che finisce nel file scaricato, non ciò che
- * pensiamo di averci messo.
+ * Confronta il foglio costruito con la matrice sorgente, cella per cella,
+ * leggendo direttamente le celle del worksheet. Per le formule verifica la
+ * formula scritta (una cella con formula non ha valore in cache finché Excel
+ * non ricalcola, quindi un confronto sui valori sarebbe inutilizzabile).
  */
-export function assertRoundTrip(ws: WorkSheet, matrix: readonly Cell[][], sheetName: string): void {
-  const back = utils.sheet_to_json<Cell[]>(ws, { header: 1, defval: null, blankrows: true });
-  if (back.length !== matrix.length) {
+export function assertSheetMatches(
+  ws: WorkSheet,
+  matrix: readonly ExportValue[][],
+  sheetName: string,
+): void {
+  const width = matrix.reduce((m, r) => Math.max(m, r.length), 0);
+  const ref = ws['!ref'];
+  if (!ref) {
+    throw new IntegrityError(`Foglio "${sheetName}": intervallo assente.`);
+  }
+  const range = utils.decode_range(ref);
+  if (range.e.r + 1 !== matrix.length || range.e.c + 1 !== width) {
     throw new IntegrityError(
-      `Foglio "${sheetName}": attese ${matrix.length} righe nel file, trovate ${back.length}.`,
+      `Foglio "${sheetName}": attese ${matrix.length}×${width} celle, il foglio è ${range.e.r + 1}×${range.e.c + 1}.`,
     );
   }
-  for (let i = 0; i < matrix.length; i++) {
-    const expected = matrix[i];
-    const actual = back[i] ?? [];
-    for (let j = 0; j < expected.length; j++) {
-      const a = expected[j] == null ? '' : String(expected[j]);
-      const b = actual[j] == null ? '' : String(actual[j]);
-      if (a !== b) {
+
+  for (let r = 0; r < matrix.length; r++) {
+    const line = matrix[r];
+    for (let c = 0; c < line.length; c++) {
+      const intended = line[c];
+      const addr = utils.encode_cell({ r, c });
+      const cell = ws[addr] as { v?: unknown; f?: string } | undefined;
+
+      if (isFormulaCell(intended)) {
+        if (!cell || cell.f !== intended.f) {
+          throw new IntegrityError(
+            `Foglio "${sheetName}" cella ${addr}: attesa formula "${intended.f}", trovata "${cell?.f ?? '(nessuna)'}".`,
+          );
+        }
+        continue;
+      }
+
+      const expected = intended == null ? '' : String(intended);
+      const actual = cell == null || cell.v == null ? '' : String(cell.v);
+      if (expected !== actual) {
         throw new IntegrityError(
-          `Foglio "${sheetName}", riga ${i + 1} colonna ${j + 1}: atteso "${a}", scritto "${b}".`,
+          `Foglio "${sheetName}" cella ${addr}: atteso "${expected}", scritto "${actual}".`,
         );
       }
     }
   }
 }
 
-export function exportWorkbook(specs: readonly SheetSpec[], filename: string): void {
+/** Larghezze colonna stimate dal contenuto, per non consegnare un foglio illeggibile. */
+function columnWidths(matrix: readonly ExportValue[][]): { wch: number }[] {
+  const width = matrix.reduce((m, r) => Math.max(m, r.length), 0);
+  const widths: number[] = new Array(width).fill(8);
+  for (const line of matrix) {
+    for (let c = 0; c < line.length; c++) {
+      const v = line[c];
+      const len = isFormulaCell(v) ? 12 : (v == null ? 0 : String(v).length);
+      if (len > widths[c]) widths[c] = len;
+    }
+  }
+  return widths.map(w => ({ wch: Math.min(w + 2, 45) }));
+}
+
+/**
+ * Costruisce il workbook (fogli, formule, filtro automatico, larghezze) senza
+ * salvarlo. Separato dal salvataggio così il risultato è ispezionabile e
+ * verificabile fuori dal browser.
+ */
+export function buildWorkbook(specs: readonly SheetSpec[]): WorkBook {
   const wb = utils.book_new();
   for (const spec of specs) {
     const ws = utils.aoa_to_sheet(spec.matrix as unknown[][]);
-    assertRoundTrip(ws, spec.matrix, spec.name);
+    assertSheetMatches(ws, spec.matrix, spec.name);
+
+    if (spec.autoFilter !== false && spec.matrix.length > 0) {
+      const width = spec.matrix.reduce((m, r) => Math.max(m, r.length), 0);
+      ws['!autofilter'] = {
+        ref: utils.encode_range({
+          s: { r: 0, c: 0 },
+          e: { r: spec.matrix.length - 1, c: Math.max(0, width - 1) },
+        }),
+      };
+    }
+    ws['!cols'] = columnWidths(spec.matrix);
+
     // I nomi foglio Excel sono limitati a 31 caratteri.
     utils.book_append_sheet(wb, ws, spec.name.slice(0, 31));
   }
-  writeFileXLSX(wb, filename);
+  return wb;
+}
+
+export function exportWorkbook(specs: readonly SheetSpec[], filename: string): void {
+  writeFileXLSX(buildWorkbook(specs), filename);
 }
 
 export function exportQuadri(
   entries: readonly ExportRow[],
   columns: readonly string[],
   filename: string,
+  options: ExportOptions = {},
 ): void {
-  const matrix = buildExportMatrix(entries, columns);
+  const matrix = buildExportMatrix(entries, columns, options);
   exportWorkbook([{ name: 'Quadri E0-V1', matrix }], filename);
 }

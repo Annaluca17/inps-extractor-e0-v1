@@ -6,19 +6,24 @@ import {
   IntegrityError,
   assertDataRowsIntact,
   assertPartition,
+  assertPermutation,
   buildExportMatrix,
   filterQuadri,
   flattenRows,
   groupByYearWithSubtotals,
+  isFormulaCell,
   normalizeHeader,
+  parseDate,
   parseYearMonth,
   partitionRows,
   resolveColumn,
+  sortByPeriod,
   toNumber,
 } from './inps';
 
 const COLS: QuadriColumns = {
   data: 'Data Inizio Periodo',
+  dataFine: 'Data Fine Periodo',
   tipologia: 'Tipologia',
   stato: 'Correnti, obsoleti, …',
   cessazione: 'Codice Motivo Cessazione',
@@ -36,13 +41,13 @@ function row(id: number, cells: Record<string, string | number | null>): InpsRow
  */
 function scenarioStorico(): InpsRow[] {
   return [
-    row(5, { 'Data Inizio Periodo': '01/05/2025', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '1334.32' }),
-    row(6, { 'Data Inizio Periodo': '01/11/2024', 'Tipologia': 'V1', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '722.57' }),
-    row(27, { 'Data Inizio Periodo': '01/06/2023', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Annullato', 'Imponibile': '1977.07' }),
-    row(28, { 'Data Inizio Periodo': '01/05/2023', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '2010.26' }),
-    row(157, { 'Data Inizio Periodo': '01/11/2012', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Obsoleto', 'Imponibile': '839.57' }),
-    row(158, { 'Data Inizio Periodo': '01/11/2012', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '839.57' }),
-    row(269, { 'Data Inizio Periodo': '01/10/2004', 'Tipologia': 'V1', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '67.56' }),
+    row(5, { 'Data Inizio Periodo': '01/05/2025', 'Data Fine Periodo': '31/05/2025', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '1334.32' }),
+    row(6, { 'Data Inizio Periodo': '01/11/2024', 'Data Fine Periodo': '30/11/2024', 'Tipologia': 'V1', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '722.57' }),
+    row(27, { 'Data Inizio Periodo': '01/06/2023', 'Data Fine Periodo': '30/06/2023', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Annullato', 'Imponibile': '1977.07' }),
+    row(28, { 'Data Inizio Periodo': '01/05/2023', 'Data Fine Periodo': '31/05/2023', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '2010.26' }),
+    row(157, { 'Data Inizio Periodo': '01/11/2012', 'Data Fine Periodo': '30/11/2012', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Obsoleto', 'Imponibile': '839.57' }),
+    row(158, { 'Data Inizio Periodo': '01/11/2012', 'Data Fine Periodo': '30/11/2012', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '839.57' }),
+    row(269, { 'Data Inizio Periodo': '01/10/2004', 'Data Fine Periodo': '31/12/2004', 'Tipologia': 'V1', 'Correnti, obsoleti, …': 'Corrente', 'Imponibile': '67.56' }),
   ];
 }
 
@@ -165,17 +170,129 @@ describe('groupByYearWithSubtotals', () => {
   });
 });
 
+describe('sortByPeriod', () => {
+  const rows = scenarioStorico();
+
+  it('ordina per data inizio decrescente, dal più recente al più vecchio', () => {
+    const out = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    expect(out.map(r => r.cells['Data Inizio Periodo'])).toEqual([
+      '01/05/2025', '01/11/2024', '01/06/2023', '01/05/2023',
+      '01/11/2012', '01/11/2012', '01/10/2004',
+    ]);
+  });
+
+  it('ordina crescente su richiesta', () => {
+    const out = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'asc');
+    expect(out[0].__id).toBe(269);
+    expect(out[out.length - 1].__id).toBe(5);
+  });
+
+  it('a parità di data inizio usa la data fine', () => {
+    const a = row(1, { 'Data Inizio Periodo': '01/01/2020', 'Data Fine Periodo': '31/01/2020' });
+    const b = row(2, { 'Data Inizio Periodo': '01/01/2020', 'Data Fine Periodo': '31/03/2020' });
+    const out = sortByPeriod([a, b], 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    expect(out.map(r => r.__id)).toEqual([2, 1]);
+  });
+
+  it('è stabile: a parità di chiave resta l\'ordine del file', () => {
+    const out = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    const dodici = out.filter(r => r.cells['Data Inizio Periodo'] === '01/11/2012');
+    expect(dodici.map(r => r.__id)).toEqual([157, 158]);
+  });
+
+  it('mette in coda le righe senza data valida, in entrambe le direzioni', () => {
+    const senzaData = row(999, { 'Data Inizio Periodo': '' });
+    for (const dir of ['desc', 'asc'] as const) {
+      const out = sortByPeriod([senzaData, ...rows], 'Data Inizio Periodo', 'Data Fine Periodo', dir);
+      expect(out[out.length - 1].__id).toBe(999);
+    }
+  });
+
+  it('non perde né duplica righe', () => {
+    const out = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    expect(() => assertPermutation(rows, out)).not.toThrow();
+    expect(new Set(out.map(r => r.__id)).size).toBe(rows.length);
+  });
+
+  it('assertPermutation rifiuta una riga persa o duplicata', () => {
+    expect(() => assertPermutation(rows, rows.slice(1))).toThrow(IntegrityError);
+    expect(() => assertPermutation(rows, [rows[0], ...rows.slice(0, rows.length - 1)])).toThrow(IntegrityError);
+  });
+});
+
 describe('buildExportMatrix', () => {
-  it('scrive una riga per ogni voce, intestazioni comprese', () => {
-    const rows = scenarioStorico();
-    const cols = ['Data Inizio Periodo', 'Tipologia'];
+  const rows = scenarioStorico();
+  const cols = ['Data Inizio Periodo', 'Tipologia', 'Imponibile'];
+
+  it('antepone la colonna Riga con il numero di riga del file INPS', () => {
     const matrix = buildExportMatrix(flattenRows(rows), cols);
     expect(matrix).toHaveLength(rows.length + 1);
-    expect(matrix[1]).toEqual(['01/05/2025', 'E0']);
+    expect(matrix[0]).toEqual([
+      'Riga', 'DT_INIZ (Data Inizio Periodo)', 'TIPO (Tipologia)', 'IMP (Imponibile)',
+    ]);
+    expect(matrix[1]).toEqual([5, '01/05/2025', 'E0', '1334.32']);
+  });
+
+  it('omette la colonna Riga se richiesto', () => {
+    const matrix = buildExportMatrix(flattenRows(rows), cols, { includeRowId: false });
+    expect(matrix[1]).toEqual(['01/05/2025', 'E0', '1334.32']);
+  });
+
+  it('scrive i subtotali come formula sull\'intervallo giusto', () => {
+    const sorted = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    const entries = groupByYearWithSubtotals(sorted, cols, 'Data Inizio Periodo');
+    const matrix = buildExportMatrix(entries, cols);
+
+    // Ordine atteso: 2025 | sub | 2024 | sub | 2023 ×2 | sub | 2012 ×2 | sub | 2004 | sub
+    // La colonna Imponibile è la D (A = Riga).
+    const formule = matrix
+      .flat()
+      .filter(isFormulaCell)
+      .map(c => c.f);
+    expect(formule).toEqual([
+      'SUBTOTAL(9,D2:D2)',    // 2025
+      'SUBTOTAL(9,D4:D4)',    // 2024
+      'SUBTOTAL(9,D6:D7)',    // 2023, due righe
+      'SUBTOTAL(9,D9:D10)',   // 2012, due righe
+      'SUBTOTAL(9,D12:D12)',  // 2004
+    ]);
+  });
+
+  it('scrive valori fissi se le formule sono disattivate', () => {
+    const sorted = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    const entries = groupByYearWithSubtotals(sorted, cols, 'Data Inizio Periodo');
+    const matrix = buildExportMatrix(entries, cols, { subtotalsAsFormula: false });
+    expect(matrix.flat().filter(isFormulaCell)).toHaveLength(0);
+    const sub2023 = matrix.find(r => r[1] === 'Subtotale 2023');
+    expect(sub2023?.[3]).toBeCloseTo(1977.07 + 2010.26, 2);
+  });
+
+  it('i blocchi dei subtotali coprono righe contigue', () => {
+    const sorted = sortByPeriod(rows, 'Data Inizio Periodo', 'Data Fine Periodo', 'desc');
+    const entries = groupByYearWithSubtotals(sorted, cols, 'Data Inizio Periodo');
+    // Ogni subtotale è preceduto solo da righe dati del proprio anno.
+    let blockYear: number | null = null;
+    for (const e of entries) {
+      if (e.kind === 'data') {
+        const y = Number(String(e.row!.cells['Data Inizio Periodo']).slice(-4));
+        if (blockYear == null) blockYear = y;
+        expect(y).toBe(blockYear);
+      } else {
+        expect(e.year).toBe(blockYear);
+        blockYear = null;
+      }
+    }
   });
 });
 
 describe('parsing dei valori', () => {
+  it('interpreta le date con il giorno, necessario per l\'ordinamento', () => {
+    expect(parseDate('15/05/2025')).toEqual({ year: 2025, month: 5, day: 15 });
+    expect(parseDate('2025-05-15')).toEqual({ year: 2025, month: 5, day: 15 });
+    expect(parseDate('2024 - Ottobre')).toEqual({ year: 2024, month: 10, day: 1 });
+    expect(parseDate('non una data')).toBeNull();
+  });
+
   it('interpreta le date nei formati INPS', () => {
     expect(parseYearMonth('01/05/2025')).toEqual({ year: 2025, month: 5 });
     expect(parseYearMonth('2025-05-01')).toEqual({ year: 2025, month: 5 });

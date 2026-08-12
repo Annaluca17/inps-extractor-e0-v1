@@ -6,11 +6,14 @@
  * identiche invarianti dei quadri (nessuna riga persa, duplicata o sostituita).
  */
 import {
-  type Cell,
+  type ExportValue,
+  type FormulaCell,
   type InpsRow,
   type SheetData,
+  type SheetSpec,
   type YearMonth,
   MONTH_NAMES,
+  ROW_ID_HEADER,
   cellOf,
   numberOf,
   parseYearMonth,
@@ -243,36 +246,57 @@ export function summarizeSgravi(rows: readonly InpsRow[], cols: SgraviColumns): 
 // Export
 // ---------------------------------------------------------------------------
 
+/** SUBTOTAL(9) su un intervallo di colonna: ignora le righe filtrate e i subtotali annidati. */
+function subtotal(col: string, from: number, to: number): FormulaCell {
+  return { t: 'n', f: `SUBTOTAL(9,${col}${from}:${col}${to})` };
+}
+
 export function buildSgraviExport(
   summary: SgraviSummary,
   rows: readonly InpsRow[],
   sheet: SheetData,
-): { name: string; matrix: Cell[][] }[] {
-  const perCodice: Cell[][] = [
+): SheetSpec[] {
+  // --- Foglio 1: per codice. Righe dati contigue, totale in fondo. ---
+  const perCodice: ExportValue[][] = [
     ['Codice', 'Descrizione sgravio', 'N. righe', 'Imponibile Sgravio', 'Altro Imponibile Sgravio', 'Anni'],
     ...summary.perCodice.map(c => [
-      c.code,
-      c.description,
-      c.count,
-      c.imponibileSgravio,
-      c.altroImponibileSgravio,
-      c.years.join(', '),
-    ] as Cell[]),
-    ['TOTALE', '', summary.totals.count, summary.totals.imponibileSgravio, summary.totals.altroImponibileSgravio, ''],
+      c.code, c.description, c.count, c.imponibileSgravio, c.altroImponibileSgravio, c.years.join(', '),
+    ] as ExportValue[]),
   ];
+  if (summary.perCodice.length > 0) {
+    const from = 2;
+    const to = summary.perCodice.length + 1;
+    perCodice.push(['TOTALE', '', subtotal('C', from, to), subtotal('D', from, to), subtotal('E', from, to), '']);
+  }
 
-  const perAnno: Cell[][] = [['Anno', 'Mese', 'N. righe', 'Imponibile Sgravio', 'Altro Imponibile Sgravio', 'Codici']];
+  // --- Foglio 2: per anno. I mesi precedono il totale d'anno, così ogni
+  //     intervallo è contiguo e il totale generale può a sua volta essere
+  //     una SUBTOTAL che ignora i totali d'anno annidati. ---
+  const perAnno: ExportValue[][] = [
+    ['Anno', 'Mese', 'N. righe', 'Imponibile Sgravio', 'Altro Imponibile Sgravio', 'Codici'],
+  ];
   for (const a of summary.perAnno) {
-    perAnno.push([a.year, 'TOTALE ANNO', a.count, a.imponibileSgravio, a.altroImponibileSgravio, a.codes.join(', ')]);
+    const from = perAnno.length + 1;
     for (const m of a.months) {
       perAnno.push([a.year, m.monthName, m.count, m.imponibileSgravio, m.altroImponibileSgravio, '']);
     }
+    const to = perAnno.length;
+    if (to >= from) {
+      perAnno.push([a.year, 'TOTALE ANNO',
+        subtotal('C', from, to), subtotal('D', from, to), subtotal('E', from, to), a.codes.join(', ')]);
+    } else {
+      perAnno.push([a.year, 'TOTALE ANNO', a.count, a.imponibileSgravio, a.altroImponibileSgravio, a.codes.join(', ')]);
+    }
   }
-  perAnno.push(['TOTALE', '', summary.totals.count, summary.totals.imponibileSgravio, summary.totals.altroImponibileSgravio, '']);
+  if (perAnno.length > 1) {
+    const to = perAnno.length;
+    perAnno.push(['TOTALE', '', subtotal('C', 2, to), subtotal('D', 2, to), subtotal('E', 2, to), '']);
+  }
 
-  const dettaglio: Cell[][] = [
-    sheet.columns.slice(),
-    ...rows.map(row => sheet.columns.map(c => cellOf(row, c) ?? '')),
+  // --- Foglio 3: dettaglio righe, con il numero di riga del file INPS. ---
+  const dettaglio: ExportValue[][] = [
+    [ROW_ID_HEADER, ...sheet.columns],
+    ...rows.map(row => [row.__id, ...sheet.columns.map(c => cellOf(row, c) ?? '')] as ExportValue[]),
   ];
 
   return [
