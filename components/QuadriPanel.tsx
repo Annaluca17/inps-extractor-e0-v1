@@ -33,6 +33,8 @@ import {
   missingPresetColumns,
   saveColumnPreset,
 } from '../lib/preferences';
+import { type Causale, CAUSALI, buildUniemensPayload, downloadPayload } from '../lib/uniemens';
+import ColumnFilterPanel from './ColumnFilterPanel';
 import { Alert, Card, Chip, ResetChip, formatInt } from './ui';
 
 const STATI_NOTI = ['Corrente', 'Spento', 'Obsoleto', 'Annullato'];
@@ -70,6 +72,20 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const [showExcluded, setShowExcluded] = useState(false);
   const [page, setPage] = useState(0);
 
+  // Filtri sulle intestazioni: colonna → valori ammessi.
+  const [columnFilters, setColumnFilters] = useState<Map<string, Set<string>>>(new Map());
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
+
+  const setColumnFilter = (column: string, values: Set<string>) => {
+    setColumnFilters(prev => {
+      const next = new Map(prev);
+      if (values.size === 0) next.delete(column);
+      else next.set(column, values);
+      return next;
+    });
+    setPage(0);
+  };
+
   const availableYears = useMemo(() => distinctYears(sheet.rows, cols.data), [sheet, cols]);
   const availableYearMonths = useMemo(() => distinctYearMonths(sheet.rows, cols.data), [sheet, cols]);
   const availableTipologie = useMemo(() => distinctValues(sheet.rows, cols.tipologia), [sheet, cols]);
@@ -83,12 +99,12 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const filtered = useMemo(() => {
     try {
       return { ok: true as const, value: filterQuadri(sheet.rows, cols, {
-        from: fromYM, to: toYM, tipologie: selectedTipologie, stati: selectedStati,
+        from: fromYM, to: toYM, tipologie: selectedTipologie, stati: selectedStati, columnFilters,
       }) };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
-  }, [sheet, cols, fromYM, toYM, selectedTipologie, selectedStati]);
+  }, [sheet, cols, fromYM, toYM, selectedTipologie, selectedStati, columnFilters]);
 
   // Memoizzati: un array nuovo a ogni render invaliderebbe i useMemo a valle.
   const filteredRows = useMemo(() => (filtered.ok ? filtered.value.kept : []), [filtered]);
@@ -138,6 +154,17 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const pageEntries = entries.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   const [exportError, setExportError] = useState<string>('');
+  const [causale, setCausale] = useState<Causale>('5');
+
+  const handleExportJson = () => {
+    setExportError('');
+    try {
+      const payload = buildUniemensPayload(keptRows, sheet, cols, causale);
+      downloadPayload(payload, `uniemens-c${causale}.json`);
+    } catch (err) {
+      setExportError(`Export JSON non riuscito: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const toggle = <T,>(setter: (fn: (prev: Set<T>) => Set<T>) => void, value: T) => {
     setter(prev => {
@@ -500,17 +527,72 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
       </Card>
 
       <div className="bg-white rounded-xl shadow overflow-hidden">
+        {(columnFilters.size > 0 || openFilter) && (
+          <div className="p-4 pb-0">
+            {columnFilters.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <span className="text-xs text-gray-400">Filtri di colonna attivi:</span>
+                {Array.from(columnFilters.entries()).map(([col, values]) => (
+                  <span
+                    key={col}
+                    className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 rounded-full pl-3 pr-1 py-1 text-xs"
+                    title={Array.from(values).join(', ')}
+                  >
+                    <button type="button" className="hover:underline" onClick={() => setOpenFilter(col)}>
+                      {E0V1_MAP[col] ?? col}: {values.size === 1 ? (Array.from(values)[0] || '(vuoto)') : `${values.size} valori`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setColumnFilter(col, new Set())}
+                      className="w-4 h-4 rounded-full hover:bg-blue-200 leading-none"
+                      aria-label={`Rimuovi filtro su ${col}`}
+                    >&times;</button>
+                  </span>
+                ))}
+                <ResetChip onClick={() => { setColumnFilters(new Map()); setPage(0); }}>Azzera tutti</ResetChip>
+              </div>
+            )}
+            {openFilter && (
+              <ColumnFilterPanel
+                column={openFilter}
+                rows={sheet.rows}
+                selected={columnFilters.get(openFilter)}
+                onChange={values => setColumnFilter(openFilter, values)}
+                onClose={() => setOpenFilter(null)}
+              />
+            )}
+          </div>
+        )}
+
         <div className="overflow-x-auto max-h-[60vh]">
           <table className="min-w-full text-sm">
             <thead className="bg-blue-700 text-white sticky top-0">
               <tr>
                 <th className="px-3 py-2 text-left whitespace-nowrap" title="Riga nel file INPS di origine">Riga</th>
-                {visibleCols.map(col => (
-                  <th key={col} className="px-3 py-2 text-left whitespace-nowrap">
-                    {E0V1_MAP[col] ? <span className="font-bold">{E0V1_MAP[col]}</span> : col}
-                    {E0V1_MAP[col] && <span className="ml-1 opacity-70 text-xs">{col}</span>}
-                  </th>
-                ))}
+                {visibleCols.map(col => {
+                  const filtered = columnFilters.has(col);
+                  return (
+                    <th key={col} className="px-3 py-2 text-left whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1">
+                        <span>
+                          {E0V1_MAP[col] ? <span className="font-bold">{E0V1_MAP[col]}</span> : col}
+                          {E0V1_MAP[col] && <span className="ml-1 opacity-70 text-xs">{col}</span>}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setOpenFilter(prev => (prev === col ? null : col))}
+                          title={filtered ? `Filtro attivo su ${col}` : `Filtra ${col}`}
+                          aria-label={`Filtra ${col}`}
+                          className={`px-1 rounded text-xs leading-none ${
+                            filtered ? 'bg-amber-300 text-amber-900' : 'text-white/60 hover:text-white hover:bg-blue-600'
+                          }`}
+                        >
+                          &#9660;
+                        </button>
+                      </span>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -586,14 +668,31 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               dal filtro non vengono conteggiate.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={handleExport}
-            disabled={keptRows.length === 0 || visibleCols.length === 0 || Boolean(integrityError)}
-            className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
-          >
-            &#128229; Genera file scaricabile (.xlsx)
-          </button>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              {CAUSALI.map(c => (
+                <Chip key={c.code} active={causale === c.code} onClick={() => setCausale(c.code)} title={c.hint}>
+                  {c.label}
+                </Chip>
+              ))}
+              <button
+                type="button"
+                onClick={handleExportJson}
+                disabled={keptRows.length === 0 || Boolean(integrityError)}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white px-5 py-2 rounded-lg font-semibold transition-colors"
+              >
+                &#8631; UniEmens Builder (.json)
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={keptRows.length === 0 || visibleCols.length === 0 || Boolean(integrityError)}
+              className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
+            >
+              &#128229; Genera file scaricabile (.xlsx)
+            </button>
+          </div>
         </div>
       </Card>
     </div>

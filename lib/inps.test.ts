@@ -106,6 +106,59 @@ describe('filterQuadri — regressione off-by-one', () => {
   });
 });
 
+describe('filtri sulle intestazioni di colonna', () => {
+  const rows = scenarioStorico();
+
+  it('tiene solo le righe con i valori ammessi', () => {
+    const { kept } = filterQuadri(rows, COLS, {
+      columnFilters: new Map([['Tipologia', new Set(['V1'])]]),
+    });
+    expect(kept.map(r => r.__id)).toEqual([6, 269]);
+  });
+
+  it('combina più colonne in AND', () => {
+    const { kept } = filterQuadri(rows, COLS, {
+      columnFilters: new Map([
+        ['Tipologia', new Set(['E0'])],
+        ['Correnti, obsoleti, …', new Set(['Corrente'])],
+      ]),
+    });
+    expect(kept.map(r => r.__id)).toEqual([5, 28, 158]);
+  });
+
+  it('si combina con gli altri filtri e resta una partizione', () => {
+    const { kept, excluded } = filterQuadri(rows, COLS, {
+      from: { year: 2012, month: 1 },
+      columnFilters: new Map([['Tipologia', new Set(['E0'])]]),
+    });
+    expect(kept.length + excluded.length).toBe(rows.length);
+    for (const r of kept) expect(r.cells['Tipologia']).toBe('E0');
+  });
+
+  it('un insieme vuoto di valori non filtra nulla', () => {
+    const { kept } = filterQuadri(rows, COLS, {
+      columnFilters: new Map([['Tipologia', new Set<string>()]]),
+    });
+    expect(kept).toHaveLength(rows.length);
+  });
+
+  it('ignora con avviso un filtro su colonna inesistente invece di svuotare tutto', () => {
+    const res = filterQuadri(rows, COLS, {
+      columnFilters: new Map([['Colonna Fantasma', new Set(['x'])]]),
+    });
+    expect(res.kept).toHaveLength(rows.length);
+    expect(res.warnings.join(' ')).toContain('Colonna Fantasma');
+  });
+
+  it('motiva l\'esclusione indicando colonna e valore', () => {
+    const { excluded } = filterQuadri(rows, COLS, {
+      columnFilters: new Map([['Tipologia', new Set(['V1'])]]),
+    });
+    expect(excluded[0].reason).toContain('Tipologia');
+    expect(excluded[0].reason).toContain('E0');
+  });
+});
+
 describe('assertPartition — intercetta lo shift', () => {
   const rows = scenarioStorico();
 

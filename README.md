@@ -41,6 +41,56 @@ va messo in whitelist o va reso disponibile un mirror interno del tarball.
   anno di competenza, con dettaglio mensile ed export su tre fogli
   (per codice, per anno, dettaglio righe).
 
+## Export verso UniEmens Variazione Builder
+
+Il pulsante *UniEmens Builder (.json)* produce un file nella forma esatta dello
+stato del builder (`mkPer()` / `dips`), pronto per l'import. Formati: date
+`AAAA-MM-GG`, `AnnoMeseErogazione` `AAAA-MM`, importi `1234,56`.
+
+La causale la sceglie l'operatore — non è derivabile dal file. **C1** aggiunge
+al dichiarato (esce con inquadramento e periodo, senza importi: il denaro nuovo
+non è nel file), **C5** lo sostituisce, **C6** lo cancella (solo date).
+
+Regole di aggregazione applicate al C5:
+
+| periodo | quadro | enti versanti |
+|---|---|---|
+| dal 10/2012 | uno per mese | una terna, `AnnoMeseErogazione` da compilare |
+| fino al 09/2012, anno **con** V1C1 | anno intero, mai spezzato | una terna **per mese di pagamento**, mese valorizzato dalla colonna `Denuncia` |
+| fino al 09/2012, anno **senza** V1C1 | cumulato | nessuno |
+
+I quadri aggregati si spezzano quando cambia l'inquadramento:
+
+| campo | perché |
+|---|---|
+| Tipo impiego | passaggio part-time ↔ tempo pieno |
+| Tipo Servizio | passaggio tempo determinato ↔ indeterminato |
+| Qualifica | progressione fra le aree |
+| Percentuale part-time | **solo dai periodi 2020 in poi**: prima le percentuali dichiarate erano spesso errate e spezzare produrrebbe frammentazione inutile |
+
+`Contratto` è escluso: vale sempre RALN, quindi non discrimina. Il confronto è
+sui **codici**, non sulle descrizioni — `056000` e `056000 POSIZIONE ECONOMICA
+DI ACCESSO C1` sono la stessa qualifica e non spezzano.
+
+Gli anni riprodotti interi per la presenza di un V1C1 non si spezzano mai: se
+al loro interno l'inquadramento varia, il quadro ne porta un solo valore e la
+cosa finisce in `_avvisi`.
+
+Ogni quadro porta `_righeOrigine` con i numeri di riga del file INPS. Le
+incongruenze finiscono in `_avvisi` dentro il JSON, non nell'interfaccia.
+
+## Filtri sulle intestazioni
+
+Ogni intestazione della tabella ha un imbuto (▼) che apre l'elenco dei valori
+distinti di quella colonna con il numero di righe per valore, una ricerca e il
+comando *solo questo*. Serve soprattutto a isolare l'ente di interesse quando
+il file ne contiene più d'uno. I filtri attivi sono elencati sopra la tabella e
+si combinano in AND con periodo, tipologia e stato.
+
+Il pannello sta **sopra** la tabella e non è un menu a comparsa
+sull'intestazione: la tabella vive in un contenitore con scorrimento, che
+ritaglierebbe un elemento posizionato in modo assoluto.
+
 ## Selezione delle colonne
 
 All'apertura di un file sono già selezionate le colonne **popolate**; quelle

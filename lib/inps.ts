@@ -571,6 +571,11 @@ export interface QuadriFilter {
   to?: YearMonth | null;
   tipologie?: ReadonlySet<string>;
   stati?: ReadonlySet<string>;
+  /**
+   * Filtri per colonna, in stile filtro automatico di Excel: colonna → valori
+   * ammessi. Un insieme vuoto equivale a nessun filtro su quella colonna.
+   */
+  columnFilters?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface QuadriColumns {
@@ -620,6 +625,18 @@ export function filterQuadri(
     warnings.push('Filtro stato ignorato: colonna "Correnti, obsoleti, …" assente.');
   }
 
+  // Solo i filtri colonna con almeno un valore ammesso sono vincolanti: un
+  // insieme vuoto significherebbe "nessuna riga passa", che non è mai ciò che
+  // l'utente intende. Le righe condividono per costruzione le stesse chiavi.
+  const knownColumns = new Set(rows.length > 0 ? Object.keys(rows[0].cells) : []);
+  const requested = Array.from(filter.columnFilters?.entries() ?? [])
+    .filter(([, allowed]) => allowed.size > 0);
+  const activeColumnFilters = requested.filter(([column]) => knownColumns.has(column));
+  const ignored = requested.filter(([column]) => !knownColumns.has(column)).map(([column]) => column);
+  if (ignored.length > 0) {
+    warnings.push(`Filtri di colonna ignorati, colonne assenti nel foglio: ${ignored.join(', ')}.`);
+  }
+
   const fromK = filter.from ? ymKey(filter.from) : null;
   const toK = filter.to ? ymKey(filter.to) : null;
 
@@ -638,6 +655,10 @@ export function filterQuadri(
     if (wantStato && cols.stato) {
       const s = textOf(row, cols.stato);
       if (!filter.stati!.has(s)) return `stato "${s || '(vuoto)'}" non selezionato`;
+    }
+    for (const [column, allowed] of activeColumnFilters) {
+      const v = textOf(row, column);
+      if (!allowed.has(v)) return `${column}: "${v || '(vuoto)'}" non selezionato`;
     }
     return null;
   });
