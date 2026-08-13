@@ -10,15 +10,17 @@
  *
  * Scelte deliberate:
  *
- * — `AnnoMeseErogazione` è SEMPRE vuoto. La colonna `Denuncia` del file INPS è
- *   il mese di trasmissione, non quello di erogazione: coincidono sugli
- *   arretrati ma non su una correzione tardiva di un periodo ordinario. Il
- *   valore lo mette l'operatore nel builder, consapevolmente.
+ * — `AnnoMeseErogazione` viene dalla colonna `Denuncia`. Attenzione: `Denuncia`
+ *   è il mese di trasmissione, che sugli arretrati coincide con quello di
+ *   erogazione — il caso in cui l'ente versante serve — ma non è la stessa
+ *   cosa. Resta un valore da controllare, non da firmare a scatola chiusa.
  *
- * — Periodi dal 10/2012: un quadro per mese, con un blocco enti versanti.
- *   Periodi fino al 09/2012: un quadro aggregato per anno, SENZA enti versanti
- *   (vanno aggiunti solo se nell'anno esiste un V1C1, e in quel caso uno per
- *   mese di pagamento: senza il mese non sarebbero distinguibili fra loro).
+ * — Periodi dal 10/2012: un quadro per mese, con un ente versante per ogni
+ *   mese di pagamento diverso da quello di competenza (se il pagamento cade
+ *   nel mese stesso l'ente versante non serve e non viene emesso).
+ *   Periodi fino al 09/2012: un quadro aggregato per anno. Se l'anno contiene
+ *   un V1C1 esce intero con un ente versante per ciascun mese di pagamento;
+ *   altrimenti si cumula senza enti versanti.
  *
  * — La causale la sceglie l'operatore: non è derivabile dal file.
  *   C1 aggiunge al dichiarato, C5 lo sostituisce, C6 lo cancella.
@@ -261,23 +263,26 @@ export const ANNO_PART_TIME_ATTENDIBILE = 2020;
 
 type Inquadramento = Record<string, string>;
 
-function inquadramentoOf(row: InpsRow, m: MappedColumns, anno: number): Inquadramento {
+function inquadramentoOf(row: InpsRow, m: MappedColumns): Inquadramento {
   const out: Inquadramento = {};
   for (const field of INQ_FIELDS) {
-    if (field === 'percPartTime') {
-      out[field] = anno >= ANNO_PART_TIME_ATTENDIBILE ? String(numberOf(row, m.percPartTime) ?? '') : '';
-      continue;
-    }
     // Si confrontano i codici, non le descrizioni: la stessa voce può comparire
     // come "056000" o "056000 POSIZIONE ECONOMICA DI ACCESSO C1".
-    out[field] = codeToken(textOf(row, m[field]));
+    out[field] = field === 'percPartTime'
+      ? textOf(row, m.percPartTime)
+      : codeToken(textOf(row, m[field]));
   }
   return out;
 }
 
-/** Compatibili se nessun campo valorizzato su entrambe le righe è diverso. */
-function inquadramentoCompatibile(a: Inquadramento, b: Inquadramento): string | null {
+/**
+ * Compatibili se nessun campo valorizzato su entrambe le righe è diverso.
+ * Prima del 2020 la percentuale part-time non viene confrontata — il valore
+ * resta però nel quadro: si ignora ai fini della spezzatura, non si cancella.
+ */
+function inquadramentoCompatibile(a: Inquadramento, b: Inquadramento, anno: number): string | null {
   for (const field of INQ_FIELDS) {
+    if (field === 'percPartTime' && anno < ANNO_PART_TIME_ATTENDIBILE) continue;
     const x = a[field];
     const y = b[field];
     if (x !== '' && y !== '' && x !== y) return field;
@@ -336,22 +341,29 @@ function enteVersanteSet(
 }
 
 /**
- * Enti versanti di un anno con V1C1: una terna per ogni mese di pagamento.
- * Qui `AnnoMeseErogazione` viene valorizzato dalla colonna `Denuncia`, perché
- * senza il mese le terne sarebbero indistinguibili fra loro e il dettaglio —
- * che è tutto il motivo per cui servono — andrebbe perso. Va comunque
- * verificato: `Denuncia` è il mese di trasmissione, che per gli arretrati
- * coincide con quello di erogazione ma non è la stessa cosa.
+ * Enti versanti: una terna per ogni mese di pagamento, con
+ * `AnnoMeseErogazione` preso dalla colonna `Denuncia`.
+ *
+ * Nota d'uso: `Denuncia` è il mese di trasmissione. Per gli arretrati coincide
+ * con quello di erogazione — che è il caso in cui l'ente versante serve — ma
+ * non è la stessa cosa, quindi resta un valore da controllare nel builder,
+ * non da firmare a scatola chiusa.
+ *
+ * `escludiMese` è il mese del periodo stesso: sui quadri mono-mese l'ente
+ * versante serve solo quando il pagamento cade in un mese diverso da quello di
+ * competenza, quindi le terne che coinciderebbero col periodo non si emettono.
  */
 function enteVersantePerMesePagamento(
   rows: readonly InpsRow[],
   m: MappedColumns,
   ente: { CFAzienda: string; PRGAZIENDA: string },
+  escludiMese: string | null,
 ): EnteVersanteRow[] {
   const perMese = new Map<string, InpsRow[]>();
   for (const row of rows) {
     const ym = parseYearMonth(textOf(row, m.denuncia));
     const key = ym ? `${ym.year}-${String(ym.month).padStart(2, '0')}` : '';
+    if (escludiMese && key === escludiMese) continue;
     const arr = perMese.get(key);
     if (arr) arr.push(row); else perMese.set(key, [row]);
   }
@@ -417,10 +429,10 @@ export function buildUniemensPayload(
       }
       const annoIntero = anniConC1.has(periodKey);
       const anno = Number(periodKey.slice(1, 5));
-      const inq = inquadramentoOf(row, m, anno);
+      const inq = inquadramentoOf(row, m);
       // Sugli anni con V1C1 non si spezza: l'anno esce intero.
       const cambio = current && current.periodKey === periodKey && !annoIntero
-        ? inquadramentoCompatibile(current.inq, inq)
+        ? inquadramentoCompatibile(current.inq, inq, anno)
         : null;
 
       if (!current || current.periodKey !== periodKey || cambio) {
@@ -464,10 +476,11 @@ export function buildUniemensPayload(
         }
         // L'anno esce intero perché contiene un V1C1: se l'inquadramento varia
         // al suo interno, il quadro ne porta comunque un solo valore.
-        const anno = Number(block.periodKey.slice(1, 5));
+        const annoBlocco = Number(block.periodKey.slice(1, 5));
         for (const field of INQ_FIELDS) {
+          if (field === 'percPartTime' && annoBlocco < ANNO_PART_TIME_ATTENDIBILE) continue;
           const valori = Array.from(new Set(
-            blockRows.map(r => inquadramentoOf(r, m, anno)[field]).filter(Boolean),
+            blockRows.map(r => inquadramentoOf(r, m)[field]).filter(Boolean),
           ));
           if (valori.length > 1) {
             avvisi.push(`${cf} ${block.periodKey.slice(1)}: anno riprodotto intero per la presenza di un V1C1, ma "${INQ_LABEL[field]}" varia (${valori.join(' | ')}); il quadro riporta ${block.inq[field]}.`);
@@ -521,11 +534,12 @@ export function buildUniemensPayload(
         enteVersante: (isC6 || isC1)
           ? []
           : block.evPerMesePagamento
-            // Anno con V1C1: una terna per mese di pagamento, mese valorizzato.
-            ? enteVersantePerMesePagamento(blockRows, m, ente)
+            // Anno con V1C1: una terna per ogni mese di pagamento, tutte.
+            ? enteVersantePerMesePagamento(blockRows, m, ente, null)
             : monoMese
-              // Quadro mensile: una terna, mese da compilare nel builder.
-              ? enteVersanteSet(blockRows, m, ente, '')
+              // Quadro mensile: terne solo per i pagamenti caduti in un mese
+              // diverso da quello di competenza.
+              ? enteVersantePerMesePagamento(blockRows, m, ente, giornoInizio.slice(0, 7))
               // Aggregato senza V1C1: si cumula, niente enti versanti.
               : [],
         _righeOrigine: blockRows.map(r => r.__id),

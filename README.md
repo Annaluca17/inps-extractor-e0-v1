@@ -55,9 +55,13 @@ Regole di aggregazione applicate al C5:
 
 | periodo | quadro | enti versanti |
 |---|---|---|
-| dal 10/2012 | uno per mese | una terna, `AnnoMeseErogazione` da compilare |
-| fino al 09/2012, anno **con** V1C1 | anno intero, mai spezzato | una terna **per mese di pagamento**, mese valorizzato dalla colonna `Denuncia` |
+| dal 10/2012 | uno per mese | una terna per ogni mese di pagamento **diverso** dal mese di competenza; se il pagamento cade nel mese stesso, nessuno |
+| fino al 09/2012, anno **con** V1C1 | anno intero, mai spezzato | una terna per **ciascun** mese di pagamento |
 | fino al 09/2012, anno **senza** V1C1 | cumulato | nessuno |
+
+`AnnoMeseErogazione` è valorizzato dalla colonna `Denuncia`. È il mese di
+trasmissione, che sugli arretrati coincide con quello di erogazione ma non è la
+stessa cosa: resta un valore da controllare nel builder.
 
 I quadri aggregati si spezzano quando cambia l'inquadramento:
 

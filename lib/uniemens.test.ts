@@ -75,13 +75,37 @@ describe('helper di conversione', () => {
 });
 
 describe('regimi di aggregazione', () => {
-  it('dal 10/2012 produce un quadro per mese, con enti versanti', () => {
+  it('dal 10/2012 produce un quadro per mese', () => {
     const rows = [mese(1, '01/10/2012', '31/10/2012'), mese(2, '01/11/2012', '30/11/2012')];
     const p = buildUniemensPayload(rows, sheet(rows), COLS, '5');
     const periodi = p.dipendenti[0].periodi;
     expect(periodi).toHaveLength(2);
     expect(periodi[0].GiornoInizio).toBe('2012-10-01');
-    expect(periodi[0].enteVersante.length).toBeGreaterThan(0);
+  });
+
+  it('nessun ente versante se il pagamento cade nel mese di competenza', () => {
+    // mese() mette la denuncia nel mese stesso del periodo
+    const rows = [mese(1, '01/10/2012', '31/10/2012')];
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+    expect(q.enteVersante).toHaveLength(0);
+  });
+
+  it('ente versante col mese della denuncia quando il pagamento è differito', () => {
+    const rows = [mese(1, '01/10/2020', '31/10/2020', { 'Denuncia': '2022 - Dicembre' })];
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+    expect(q.enteVersante.length).toBeGreaterThan(0);
+    for (const ev of q.enteVersante) expect(ev.AnnoMeseErogazione).toBe('2022-12');
+  });
+
+  it('una terna per ogni mese di pagamento distinto', () => {
+    const rows = [
+      mese(1, '01/11/2024', '30/11/2024', { 'Denuncia': '2026 - Marzo' }),
+      mese(2, '01/11/2024', '30/11/2024', { 'Denuncia': '2026 - Aprile' }),
+      mese(3, '01/11/2024', '30/11/2024', { 'Denuncia': '2024 - Dicembre' }),
+    ];
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+    const mesi = Array.from(new Set(q.enteVersante.map(e => e.AnnoMeseErogazione))).sort();
+    expect(mesi).toEqual(['2024-12', '2026-03', '2026-04']);
   });
 
   it('fino al 09/2012 aggrega l\'anno, senza enti versanti', () => {
@@ -159,13 +183,16 @@ describe('spezzatura al cambio di inquadramento', () => {
     expect(p.dipendenti[0].periodi).toHaveLength(1);
   });
 
-  it('ignora la percentuale part time prima del 2020', () => {
+  it('ignora la percentuale part time prima del 2020, ma la conserva nel quadro', () => {
     const rows = [
       mese(1, '01/01/2011', '31/01/2011', { 'Tipo impiego': pt, 'Percentuale part time': '50' }),
       mese(2, '01/02/2011', '28/02/2011', { 'Tipo impiego': pt, 'Percentuale part time': '75' }),
     ];
     const p = buildUniemensPayload(rows, sheet(rows), COLS, '5');
-    expect(p.dipendenti[0].periodi).toHaveLength(1);
+    const periodi = p.dipendenti[0].periodi;
+    expect(periodi).toHaveLength(1);
+    // ignorata ai fini della spezzatura, non cancellata dal quadro
+    expect(periodi[0].PercPartTime).toBe('50');
   });
 
   it('considera la percentuale part time dal 2020', () => {
