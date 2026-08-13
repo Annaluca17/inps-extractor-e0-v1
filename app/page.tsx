@@ -133,8 +133,10 @@ export default function Home() {
             ))}
           </nav>
 
-          {tab === 'quadri' && workbook.quadri && <QuadriPanel key={workbook.quadri.name} sheet={workbook.quadri} />}
-          {tab === 'sgravi' && workbook.sgravi && <SgraviPanel key={workbook.sgravi.name} sheet={workbook.sgravi} />}
+          {/* La chiave è il nome del file: i fogli si chiamano sempre uguale,
+              e riusare lo stato fra due file diversi porterebbe selezioni stantie. */}
+          {tab === 'quadri' && workbook.quadri && <QuadriPanel key={fileName} sheet={workbook.quadri} />}
+          {tab === 'sgravi' && workbook.sgravi && <SgraviPanel key={fileName} sheet={workbook.sgravi} />}
           {tab === 'sgravi' && !workbook.sgravi && (
             <Alert tone="info" title="Nessun foglio sgravi nel file">
               <p>Il file caricato non contiene il foglio &quot;Elenco Sgravi&quot;.</p>
