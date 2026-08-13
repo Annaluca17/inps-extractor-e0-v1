@@ -41,6 +41,22 @@ va messo in whitelist o va reso disponibile un mirror interno del tarball.
   anno di competenza, con dettaglio mensile ed export su tre fogli
   (per codice, per anno, dettaglio righe).
 
+## Selezione delle colonne
+
+All'apertura di un file sono già selezionate le colonne **popolate**; quelle
+senza alcun valore restano spente e sono mostrate tratteggiate con l'etichetta
+"vuota". Ogni colonna riporta quanti valori contiene. Sul tracciato PASSWEB
+tipico ciò significa 80 colonne attive su 115.
+
+Con **Salva la selezione attuale** l'elenco viene memorizzato nel browser
+(`localStorage`) come *colonne predefinite*: da quel momento sono sempre
+attive a ogni caricamento, anche se nel file risultano vuote — sono marcate
+con 📌. Se una predefinita non esiste proprio nel file caricato viene
+segnalata. Sono disponibili anche le selezioni rapide *Solo colonne con dati*,
+*Colonne principali*, *Solo le predefinite*, *Tutte*, *Nessuna*.
+
+Nessun dato del file viene salvato: solo i nomi delle colonne scelte.
+
 ## Il file esportato
 
 - **Ordinamento** per Data Inizio Periodo e, a parità, Data Fine Periodo.
@@ -49,6 +65,11 @@ va messo in whitelist o va reso disponibile un mirror interno del tarball.
   coda in entrambe le direzioni, per non mescolarsi ai dati validi.
 - **Colonna `Riga`** in testa, con il numero di riga del file INPS di origine:
   permette di risalire alla riga sorgente di qualunque valore.
+- **Intestazioni brevi**: la sigla quando esiste (`CF`, `DT_INIZ`, `IMP`…),
+  altrimenti il nome originale. Le larghezze sono calcolate sul dato e non
+  sull'intestazione, che può allargare la colonna solo fino a 14 caratteri:
+  nei tracciati PASSWEB l'intestazione è più lunga del contenuto in 66 colonne
+  su 80, e lasciarla comandare produceva colonne larghissime e mezze vuote.
 - **Filtro automatico** sulla riga di intestazione.
 - **Subtotali come formula** `SUBTOTAL(9;intervallo)`. Aggiungendo o togliendo
   righe in Excel i totali si aggiornano; le righe nascoste dal filtro non
