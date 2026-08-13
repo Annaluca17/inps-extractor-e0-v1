@@ -649,6 +649,34 @@ export function filterQuadri(
 // Valori distinti
 // ---------------------------------------------------------------------------
 
+/**
+ * Quanti valori non vuoti ha ciascuna colonna. Serve a preselezionare le
+ * colonne popolate e a lasciar spente quelle che nel file sono vuote: nei
+ * tracciati PASSWEB una buona parte delle 115 colonne non è mai valorizzata.
+ */
+export function columnValueCounts(
+  rows: readonly InpsRow[],
+  columns: readonly string[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const c of columns) counts.set(c, 0);
+  for (const row of rows) {
+    for (const c of columns) {
+      const v = row.cells[c];
+      if (v == null) continue;
+      if (typeof v === 'string' && v.trim() === '') continue;
+      counts.set(c, (counts.get(c) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Colonne con almeno un valore, nell'ordine del foglio. */
+export function nonEmptyColumns(rows: readonly InpsRow[], columns: readonly string[]): string[] {
+  const counts = columnValueCounts(rows, columns);
+  return columns.filter(c => (counts.get(c) ?? 0) > 0);
+}
+
 export function distinctValues(rows: readonly InpsRow[], column: string | null): string[] {
   if (!column) return [];
   const set = new Set<string>();
@@ -822,9 +850,13 @@ export interface SheetSpec {
 /** Intestazione della colonna con il numero di riga del file INPS di origine. */
 export const ROW_ID_HEADER = 'Riga';
 
+/**
+ * Intestazione usata nel file esportato: solo la sigla breve quando esiste
+ * (`CF`, `DT_INIZ`, …), altrimenti il nome originale. Le descrizioni lunghe
+ * fra parentesi allargavano le colonne ben oltre il dato contenuto.
+ */
 export function columnLabel(column: string): string {
-  const short = E0V1_MAP[column];
-  return short ? `${short} (${column})` : column;
+  return E0V1_MAP[column] ?? column;
 }
 
 export interface ExportOptions {
@@ -943,18 +975,37 @@ export function assertSheetMatches(
   }
 }
 
-/** Larghezze colonna stimate dal contenuto, per non consegnare un foglio illeggibile. */
+/**
+ * Larghezze colonna calcolate sul DATO, non sull'intestazione: in questi
+ * tracciati l'intestazione è quasi sempre più lunga del contenuto, e lasciarla
+ * comandare produce colonne larghissime e mezze vuote. L'intestazione può
+ * allargare la colonna solo fino a `HEADER_WIDTH_CAP`; oltre viene troncata a
+ * schermo, restando comunque leggibile nella barra della formula.
+ */
+const HEADER_WIDTH_CAP = 14;
+const MIN_WIDTH = 6;
+const MAX_WIDTH = 45;
+
 function columnWidths(matrix: readonly ExportValue[][]): { wch: number }[] {
   const width = matrix.reduce((m, r) => Math.max(m, r.length), 0);
-  const widths: number[] = new Array(width).fill(8);
-  for (const line of matrix) {
+  const dataWidths: number[] = new Array(width).fill(0);
+  const headerWidths: number[] = new Array(width).fill(0);
+
+  for (let r = 0; r < matrix.length; r++) {
+    const line = matrix[r];
     for (let c = 0; c < line.length; c++) {
       const v = line[c];
-      const len = isFormulaCell(v) ? 12 : (v == null ? 0 : String(v).length);
-      if (len > widths[c]) widths[c] = len;
+      const len = isFormulaCell(v) ? 10 : (v == null ? 0 : String(v).length);
+      if (r === 0) headerWidths[c] = len;
+      else if (len > dataWidths[c]) dataWidths[c] = len;
     }
   }
-  return widths.map(w => ({ wch: Math.min(w + 2, 45) }));
+
+  return dataWidths.map((dataLen, c) => {
+    const headerLen = Math.min(headerWidths[c], HEADER_WIDTH_CAP);
+    const wch = Math.max(dataLen, headerLen) + 2;
+    return { wch: Math.min(Math.max(wch, MIN_WIDTH), MAX_WIDTH) };
+  });
 }
 
 /**

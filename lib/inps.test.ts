@@ -8,10 +8,12 @@ import {
   assertPartition,
   assertPermutation,
   buildExportMatrix,
+  columnValueCounts,
   filterQuadri,
   flattenRows,
   groupByYearWithSubtotals,
   isFormulaCell,
+  nonEmptyColumns,
   normalizeHeader,
   parseDate,
   parseYearMonth,
@@ -20,6 +22,7 @@ import {
   sortByPeriod,
   toNumber,
 } from './inps';
+import { initialColumnSelection, missingPresetColumns } from './preferences';
 
 const COLS: QuadriColumns = {
   data: 'Data Inizio Periodo',
@@ -224,13 +227,16 @@ describe('buildExportMatrix', () => {
   const rows = scenarioStorico();
   const cols = ['Data Inizio Periodo', 'Tipologia', 'Imponibile'];
 
-  it('antepone la colonna Riga con il numero di riga del file INPS', () => {
+  it('antepone la colonna Riga e usa le sigle brevi come intestazione', () => {
     const matrix = buildExportMatrix(flattenRows(rows), cols);
     expect(matrix).toHaveLength(rows.length + 1);
-    expect(matrix[0]).toEqual([
-      'Riga', 'DT_INIZ (Data Inizio Periodo)', 'TIPO (Tipologia)', 'IMP (Imponibile)',
-    ]);
+    expect(matrix[0]).toEqual(['Riga', 'DT_INIZ', 'TIPO', 'IMP']);
     expect(matrix[1]).toEqual([5, '01/05/2025', 'E0', '1334.32']);
+  });
+
+  it('per le colonne senza sigla tiene il nome originale', () => {
+    const matrix = buildExportMatrix(flattenRows(rows), ['Retribuzione valutabile ai fini TFR']);
+    expect(matrix[0]).toEqual(['Riga', 'Retribuzione valutabile ai fini TFR']);
   });
 
   it('omette la colonna Riga se richiesto', () => {
@@ -282,6 +288,44 @@ describe('buildExportMatrix', () => {
         blockYear = null;
       }
     }
+  });
+});
+
+describe('colonne popolate e vuote', () => {
+  const rows = [
+    row(5, { 'A': 'x', 'B': '', 'C': null, 'D': 0 }),
+    row(6, { 'A': 'y', 'B': '   ', 'C': null, 'D': 3 }),
+    row(7, { 'A': '', 'B': 'z', 'C': null, 'D': 7 }),
+  ];
+  const cols = ['A', 'B', 'C', 'D'];
+
+  it('conta i valori non vuoti per colonna', () => {
+    const counts = columnValueCounts(rows, cols);
+    expect(counts.get('A')).toBe(2);
+    expect(counts.get('B')).toBe(1);   // stringhe di soli spazi non contano
+    expect(counts.get('C')).toBe(0);
+    expect(counts.get('D')).toBe(3);   // lo zero è un valore
+  });
+
+  it('elenca solo le colonne con almeno un valore, nell\'ordine del foglio', () => {
+    expect(nonEmptyColumns(rows, cols)).toEqual(['A', 'B', 'D']);
+  });
+
+  it('la selezione iniziale unisce colonne popolate e predefinite salvate', () => {
+    const selection = initialColumnSelection(cols, nonEmptyColumns(rows, cols), ['C']);
+    expect(Array.from(selection).sort()).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('senza predefinite salvate seleziona solo le colonne popolate', () => {
+    const selection = initialColumnSelection(cols, nonEmptyColumns(rows, cols), null);
+    expect(selection.has('C')).toBe(false);
+    expect(selection.size).toBe(3);
+  });
+
+  it('ignora le predefinite che non esistono nel file e le segnala', () => {
+    const selection = initialColumnSelection(cols, nonEmptyColumns(rows, cols), ['C', 'Inesistente']);
+    expect(selection.has('Inesistente')).toBe(false);
+    expect(missingPresetColumns(cols, ['C', 'Inesistente'])).toEqual(['Inesistente']);
   });
 });
 
