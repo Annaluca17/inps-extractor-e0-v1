@@ -10,6 +10,7 @@ import {
   IntegrityError,
   SUBTOTAL_COLUMNS,
   cellOf,
+  columnValueCounts,
   distinctValues,
   distinctYearMonths,
   distinctYears,
@@ -19,11 +20,19 @@ import {
   flattenRows,
   formatYearMonth,
   groupByYearWithSubtotals,
+  nonEmptyColumns,
   resolveQuadriColumns,
   sortByPeriod,
   textOf,
   yearMonthOfRow,
 } from '../lib/inps';
+import {
+  clearColumnPreset,
+  initialColumnSelection,
+  loadColumnPreset,
+  missingPresetColumns,
+  saveColumnPreset,
+} from '../lib/preferences';
 import { Alert, Card, Chip, ResetChip, formatInt } from './ui';
 
 const STATI_NOTI = ['Corrente', 'Spento', 'Obsoleto', 'Annullato'];
@@ -32,10 +41,24 @@ const PAGE_SIZE = 50;
 export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const cols = useMemo(() => resolveQuadriColumns(sheet.columns), [sheet]);
 
-  const [activeColumns, setActiveColumns] = useState<Set<string>>(() => {
-    const defaults = DEFAULT_COLUMNS.filter(c => sheet.columns.includes(c));
-    return new Set(defaults.length > 0 ? defaults : sheet.columns.slice(0, 14));
-  });
+  // Colonne popolate nel file: sono quelle preselezionate. Le colonne senza
+  // alcun valore restano spente, così l'export non porta colonne vuote.
+  const valueCounts = useMemo(() => columnValueCounts(sheet.rows, sheet.columns), [sheet]);
+  const withData = useMemo(() => nonEmptyColumns(sheet.rows, sheet.columns), [sheet]);
+
+  // Il pannello si monta solo dopo il caricamento del file, quindi siamo già
+  // lato browser e le preferenze si possono leggere subito (loadColumnPreset
+  // è comunque difeso contro l'assenza di window).
+  const [preset, setPreset] = useState<string[] | null>(() => loadColumnPreset());
+  const [activeColumns, setActiveColumns] = useState<Set<string>>(
+    () => initialColumnSelection(sheet.columns, withData, preset),
+  );
+  const [presetNotice, setPresetNotice] = useState('');
+
+  const presetMissing = useMemo(
+    () => missingPresetColumns(sheet.columns, preset),
+    [sheet, preset],
+  );
   const [fromYM, setFromYM] = useState<YearMonth | null>(null);
   const [toYM, setToYM] = useState<YearMonth | null>(null);
   const [selectedTipologie, setSelectedTipologie] = useState<Set<string>>(new Set());
@@ -369,36 +392,111 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
       <Card
         title="Selezione colonne"
         right={
-          <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">
-            {activeColumns.size} attive / {sheet.columns.length} totali
+          <span className="text-sm font-medium tabular-nums">
+            <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
+              {activeColumns.size} attive / {sheet.columns.length}
+            </span>
+            <span className="ml-2 bg-gray-100 text-gray-600 px-3 py-1 rounded-full">
+              {sheet.columns.length - withData.length} senza dati
+            </span>
           </span>
         }
       >
-        <div className="flex flex-wrap gap-2 max-h-56 overflow-y-auto">
-          {sheet.columns.map(col => (
-            <label
-              key={col}
-              className={`flex items-center gap-1 px-3 py-1 rounded-full border cursor-pointer text-sm ${
-                activeColumns.has(col)
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-gray-600 border-gray-300'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={activeColumns.has(col)}
-                onChange={() => setActiveColumns(prev => {
-                  const s = new Set(prev);
-                  if (s.has(col)) s.delete(col); else s.add(col);
-                  return s;
-                })}
-                className="hidden"
-              />
-              {E0V1_MAP[col] && <span className="font-bold">{E0V1_MAP[col]}</span>}
-              <span>{col}</span>
-            </label>
-          ))}
+        {presetMissing.length > 0 && (
+          <div className="mb-3">
+            <Alert tone="warning" title="Colonne predefinite non presenti in questo file">
+              <p>{presetMissing.join(', ')}</p>
+            </Alert>
+          </div>
+        )}
+        {presetNotice && <p className="mb-3 text-sm text-green-700">{presetNotice}</p>}
+
+        <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-gray-100">
+          <span className="text-xs text-gray-400">Selezione rapida:</span>
+          <ResetChip onClick={() => setActiveColumns(new Set(withData))}>Solo colonne con dati</ResetChip>
+          <ResetChip onClick={() => setActiveColumns(new Set(DEFAULT_COLUMNS.filter(c => sheet.columns.includes(c))))}>
+            Colonne principali
+          </ResetChip>
+          <ResetChip onClick={() => setActiveColumns(new Set(sheet.columns))}>Tutte</ResetChip>
+          <ResetChip onClick={() => setActiveColumns(new Set())}>Nessuna</ResetChip>
+
+          <span className="w-px h-5 bg-gray-200 mx-1" />
+          <span className="text-xs text-gray-400">
+            Predefinite{preset ? ` (${preset.length} salvate)` : ' (nessuna salvata)'}:
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const cols = sheet.columns.filter(c => activeColumns.has(c));
+              const ok = saveColumnPreset(cols);
+              setPreset(ok ? cols : preset);
+              setPresetNotice(ok
+                ? `Salvate ${cols.length} colonne come predefinite: saranno sempre attive, anche se vuote.`
+                : 'Salvataggio non riuscito: il browser non consente la memorizzazione locale.');
+            }}
+            className="px-3 py-1 rounded-full border text-sm bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+          >
+            Salva la selezione attuale
+          </button>
+          {preset && (
+            <>
+              <ResetChip onClick={() => setActiveColumns(new Set(preset.filter(c => sheet.columns.includes(c))))}>
+                Solo le predefinite
+              </ResetChip>
+              <ResetChip onClick={() => {
+                clearColumnPreset();
+                setPreset(null);
+                setPresetNotice('Predefinite cancellate.');
+              }}>
+                Cancella predefinite
+              </ResetChip>
+            </>
+          )}
         </div>
+
+        <div className="flex flex-wrap gap-2 max-h-64 overflow-y-auto">
+          {sheet.columns.map(col => {
+            const count = valueCounts.get(col) ?? 0;
+            const empty = count === 0;
+            const pinned = preset?.includes(col) ?? false;
+            const active = activeColumns.has(col);
+            return (
+              <label
+                key={col}
+                title={empty ? 'Nessun valore in questo file' : `${formatInt(count)} valori su ${formatInt(sheet.rows.length)} righe`}
+                className={`flex items-center gap-1 px-3 py-1 rounded-full border cursor-pointer text-sm ${
+                  active
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : empty
+                      ? 'bg-gray-50 text-gray-400 border-gray-200 border-dashed'
+                      : 'bg-white text-gray-600 border-gray-300'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={active}
+                  onChange={() => setActiveColumns(prev => {
+                    const s = new Set(prev);
+                    if (s.has(col)) s.delete(col); else s.add(col);
+                    return s;
+                  })}
+                  className="hidden"
+                />
+                {pinned && <span title="Colonna predefinita">&#128204;</span>}
+                {E0V1_MAP[col] && <span className="font-bold">{E0V1_MAP[col]}</span>}
+                <span>{col}</span>
+                <span className={active ? 'text-blue-200 text-xs' : 'text-gray-400 text-xs'}>
+                  {empty ? 'vuota' : formatInt(count)}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <p className="text-xs text-gray-400 mt-3">
+          Le colonne popolate sono già selezionate, quelle senza alcun valore restano spente (tratteggiate).
+          Le predefinite (&#128204;) restano attive a ogni caricamento, anche se nel file sono vuote.
+          Nel file esportato l&apos;intestazione è la sigla breve quando esiste, per non avere colonne più larghe del dato.
+        </p>
       </Card>
 
       <div className="bg-white rounded-xl shadow overflow-hidden">
