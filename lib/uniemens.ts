@@ -205,6 +205,23 @@ export function tipoPartTimeOf(value: string): string {
 }
 
 /**
+ * Percentuale part-time nel formato DMA2: un intero, cioè la percentuale con
+ * tre decimali e senza separatore — 66,67% si dichiara `66670`. PASSWEB la
+ * espone invece come decimale (`66.67`), quindi va riscalata: passarla così
+ * com'è produce un valore cento volte più piccolo del dovuto.
+ *
+ * Un valore già maggiore di 100 non può essere una percentuale: è di sicuro
+ * già nella forma DMA2 e si lascia stare.
+ */
+export function percPartTimeOf(value: string): string {
+  const s = String(value ?? '').trim();
+  if (s === '') return '';
+  const n = Number(s.replace(/[^\d,.-]/g, '').replace(',', '.'));
+  if (!Number.isFinite(n) || n === 0) return '';
+  return String(Math.round(n > 100 ? n : n * 1000));
+}
+
+/**
  * Codice motivo cessazione. Il tracciato usa `0` per dire "nessuna
  * cessazione": è un riempitivo, non un codice, e non va dichiarato.
  */
@@ -676,7 +693,7 @@ export function buildUniemensPayload(
         TipoImpiego: isC6 ? '' : tipoImpiego,
         TipoServizio: isC6 ? '' : inq.tipoServizio,
         Qualifica: isC6 ? '' : inq.qualifica,
-        PercPartTime: isC6 ? '' : inq.percPartTime,
+        PercPartTime: isC6 ? '' : percPartTimeOf(inq.percPartTime),
         // Non fanno parte dei criteri di spezzatura: si leggono dalla riga di
         // riferimento, non dall'inquadramento del blocco.
         Contratto: isC6 ? '' : codeToken(textOf(ref, m.contratto)),
@@ -724,6 +741,26 @@ export function buildUniemensPayload(
 
     // Il blocco cumulato viene creato per primo: si riordina cronologicamente.
     periodi.sort((a, b) => (a.GiornoInizio < b.GiornoInizio ? -1 : a.GiornoInizio > b.GiornoInizio ? 1 : 0));
+
+    // Due quadri causale 5 sullo stesso periodo si annullano a vicenda: la C5
+    // sostituisce il dichiarato, INPS li elabora in sequenza e l'ultimo vince.
+    // Il file resta formalmente valido, quindi l'errore non si vede: il caso
+    // tipico è una riga superata (E0 "Spento") rimasta nei filtri accanto al
+    // V1 che l'aveva già corretta.
+    if (causale === '5') {
+      const perPeriodo = new Map<string, BuilderPeriodo[]>();
+      for (const p of periodi) {
+        const chiave = `${p.GiornoInizio}|${p.GiornoFine}`;
+        const arr = perPeriodo.get(chiave);
+        if (arr) arr.push(p); else perPeriodo.set(chiave, [p]);
+      }
+      for (const [chiave, gruppo] of Array.from(perPeriodo.entries())) {
+        if (gruppo.length < 2) continue;
+        const [inizio, fine] = chiave.split('|');
+        const dettaglio = gruppo.map(p => `righe ${p._righeOrigine.join('+')}`).join(' e ');
+        avvisi.push(`${cf} ${inizio} → ${fine}: ${gruppo.length} quadri causale 5 sullo stesso periodo (${dettaglio}). INPS li elabora in sequenza e l'ultimo sostituisce i precedenti: ne va tenuto uno solo.`);
+      }
+    }
 
     // Il tracciato PASSWEB non porta l'anagrafica: quella che c'è l'ha
     // digitata l'operatore. Cognome e nome sono obbligatori nell'XML.

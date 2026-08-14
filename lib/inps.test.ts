@@ -106,6 +106,51 @@ describe('filterQuadri — regressione off-by-one', () => {
   });
 });
 
+describe('esclusione manuale di singole righe', () => {
+  const rows = scenarioStorico();
+
+  it('toglie solo le righe indicate, con il motivo nel registro', () => {
+    const { kept, excluded } = filterQuadri(rows, COLS, { escluseManuali: new Set([28]) });
+    expect(kept.map(r => r.__id)).not.toContain(28);
+    const ex = excluded.find(e => e.row.__id === 28);
+    expect(ex?.reason).toContain('a mano');
+  });
+
+  it('resta una partizione: tenute + escluse coprono il foglio', () => {
+    const { kept, excluded } = filterQuadri(rows, COLS, {
+      stati: new Set(['Corrente']),
+      escluseManuali: new Set([5, 158]),
+    });
+    expect(kept.length + excluded.length).toBe(rows.length);
+    expect(kept.map(r => r.__id)).not.toContain(5);
+    expect(kept.map(r => r.__id)).not.toContain(158);
+  });
+
+  it('distingue due righe che nessun filtro per valore separerebbe', () => {
+    // 5 e 28 sono entrambe E0 Correnti: solo la scelta puntuale le distingue.
+    const { kept } = filterQuadri(rows, COLS, {
+      stati: new Set(['Corrente']),
+      escluseManuali: new Set([28]),
+    });
+    expect(kept.map(r => r.__id)).toContain(5);
+    expect(kept.map(r => r.__id)).not.toContain(28);
+  });
+
+  it('prevale sui filtri: il motivo resta quello dell\'operatore', () => {
+    const { excluded } = filterQuadri(rows, COLS, {
+      stati: new Set(['Corrente']),
+      escluseManuali: new Set([27]),   // 27 sarebbe già esclusa dallo stato
+    });
+    expect(excluded.find(e => e.row.__id === 27)?.reason).toContain('a mano');
+  });
+
+  it('senza esclusioni manuali nulla cambia', () => {
+    const a = filterQuadri(rows, COLS, { stati: new Set(['Corrente']) });
+    const b = filterQuadri(rows, COLS, { stati: new Set(['Corrente']), escluseManuali: new Set() });
+    expect(b.kept.map(r => r.__id)).toEqual(a.kept.map(r => r.__id));
+  });
+});
+
 describe('filtri sulle intestazioni di colonna', () => {
   const rows = scenarioStorico();
 
@@ -280,14 +325,15 @@ describe('buildExportMatrix', () => {
   const rows = scenarioStorico();
   const cols = ['Data Inizio Periodo', 'Tipologia', 'Imponibile'];
 
-  it('antepone la colonna Riga e usa le sigle brevi come intestazione', () => {
+  it('antepone la colonna Riga e tiene i nomi di colonna del file di origine', () => {
     const matrix = buildExportMatrix(flattenRows(rows), cols);
     expect(matrix).toHaveLength(rows.length + 1);
-    expect(matrix[0]).toEqual(['Riga', 'DT_INIZ', 'TIPO', 'IMP']);
+    // Nessuna sigla: l'export deve restare confrontabile a occhio col file INPS.
+    expect(matrix[0]).toEqual(['Riga', 'Data Inizio Periodo', 'Tipologia', 'Imponibile']);
     expect(matrix[1]).toEqual([5, '01/05/2025', 'E0', '1334.32']);
   });
 
-  it('per le colonne senza sigla tiene il nome originale', () => {
+  it('tiene il nome originale anche per le colonne fuori dalla mappa', () => {
     const matrix = buildExportMatrix(flattenRows(rows), ['Retribuzione valutabile ai fini TFR']);
     expect(matrix[0]).toEqual(['Riga', 'Retribuzione valutabile ai fini TFR']);
   });

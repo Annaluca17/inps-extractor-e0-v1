@@ -113,15 +113,26 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   }, [sheet, cols]);
   const cessazione = useMemo(() => firstCessationPeriod(sheet.rows, cols), [sheet, cols]);
 
+  // Righe scartate una per una. I filtri ragionano per valore e non bastano:
+  // un doppione da buttare e la riga buona possono avere lo stesso stato e lo
+  // stesso periodo, quindi nessun filtro sa distinguerli.
+  const [escluseManuali, setEscluseManuali] = useState<Set<number>>(new Set());
+  const toggleEsclusa = (id: number) => setEscluseManuali(prev => {
+    const s = new Set(prev);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    return s;
+  });
+
   const filtered = useMemo(() => {
     try {
       return { ok: true as const, value: filterQuadri(sheet.rows, cols, {
         from: fromYM, to: toYM, tipologie: selectedTipologie, stati: selectedStati, columnFilters,
+        escluseManuali,
       }) };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
-  }, [sheet, cols, fromYM, toYM, selectedTipologie, selectedStati, columnFilters]);
+  }, [sheet, cols, fromYM, toYM, selectedTipologie, selectedStati, columnFilters, escluseManuali]);
 
   // Memoizzati: un array nuovo a ogni render invaliderebbe i useMemo a valle.
   const filteredRows = useMemo(() => (filtered.ok ? filtered.value.kept : []), [filtered]);
@@ -484,15 +495,27 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
       {/* Registro delle esclusioni: ogni riga mancante ha un motivo consultabile */}
       {excluded.length > 0 && (
         <Card
-          title={`Righe escluse dai filtri (${formatInt(excluded.length)})`}
+          title={`Righe escluse (${formatInt(excluded.length)})`}
           right={
-            <button
-              type="button"
-              onClick={() => setShowExcluded(v => !v)}
-              className="text-sm px-3 py-1 rounded border border-gray-300 hover:bg-gray-50"
-            >
-              {showExcluded ? 'Nascondi' : 'Mostra elenco'}
-            </button>
+            <span className="flex items-center gap-2">
+              {escluseManuali.size > 0 && (
+                <span className="text-sm bg-rose-100 text-rose-800 px-3 py-1 rounded-full">
+                  {escluseManuali.size} a mano
+                  <button
+                    type="button"
+                    onClick={() => setEscluseManuali(new Set())}
+                    className="ml-2 underline hover:text-rose-900"
+                  >ripristina tutte</button>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowExcluded(v => !v)}
+                className="text-sm px-3 py-1 rounded border border-gray-300 hover:bg-gray-50"
+              >
+                {showExcluded ? 'Nascondi' : 'Mostra elenco'}
+              </button>
+            </span>
           }
         >
           {showExcluded ? (
@@ -505,18 +528,31 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                     <th className="px-3 py-2 text-left">Tipologia</th>
                     <th className="px-3 py-2 text-left">Stato</th>
                     <th className="px-3 py-2 text-left">Motivo esclusione</th>
+                    <th className="px-3 py-2 text-left"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {excluded.map(ex => (
-                    <tr key={ex.row.__id} className="border-b border-gray-100">
-                      <td className="px-3 py-1 tabular-nums text-gray-500">{ex.row.__id}</td>
-                      <td className="px-3 py-1 whitespace-nowrap">{textOf(ex.row, cols.data)}</td>
-                      <td className="px-3 py-1">{textOf(ex.row, cols.tipologia)}</td>
-                      <td className="px-3 py-1">{textOf(ex.row, cols.stato)}</td>
-                      <td className="px-3 py-1 text-gray-600">{ex.reason}</td>
-                    </tr>
-                  ))}
+                  {excluded.map(ex => {
+                    const aMano = escluseManuali.has(ex.row.__id);
+                    return (
+                      <tr key={ex.row.__id} className={`border-b border-gray-100 ${aMano ? 'bg-rose-50' : ''}`}>
+                        <td className="px-3 py-1 tabular-nums text-gray-500">{ex.row.__id}</td>
+                        <td className="px-3 py-1 whitespace-nowrap">{textOf(ex.row, cols.data)}</td>
+                        <td className="px-3 py-1">{textOf(ex.row, cols.tipologia)}</td>
+                        <td className="px-3 py-1">{textOf(ex.row, cols.stato)}</td>
+                        <td className={`px-3 py-1 ${aMano ? 'text-rose-800' : 'text-gray-600'}`}>{ex.reason}</td>
+                        <td className="px-3 py-1">
+                          {aMano && (
+                            <button
+                              type="button"
+                              onClick={() => toggleEsclusa(ex.row.__id)}
+                              className="text-rose-700 underline hover:text-rose-900"
+                            >ripristina</button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -643,7 +679,6 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                   className="hidden"
                 />
                 {pinned && <span title="Colonna predefinita">&#128204;</span>}
-                {E0V1_MAP[col] && <span className="font-bold">{E0V1_MAP[col]}</span>}
                 <span>{col}</span>
                 <span className={active ? 'text-blue-200 text-xs' : 'text-gray-400 text-xs'}>
                   {empty ? 'vuota' : formatInt(count)}
@@ -701,11 +736,11 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
           <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-sm">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               <span className="font-semibold text-amber-900">
-                &#8721; {righeCumulate.length} righe selezionate
+                &#8721; {righeCumulate.length} righe da fondere in un quadro unico
               </span>
               {totaliCumulo.map(({ col, totale }) => (
                 <span key={col} className="text-amber-900 tabular-nums">
-                  {E0V1_MAP[col] ?? col}: <span className="font-semibold">{formatNumber(totale)}</span>
+                  {col}: <span className="font-semibold">{formatNumber(totale)}</span>
                 </span>
               ))}
               <button
@@ -714,6 +749,10 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                 className="underline text-amber-700 hover:text-amber-900"
               >azzera</button>
             </div>
+            <p className="text-xs text-amber-700 mt-1">
+              La spunta decide solo cosa confluisce in questo quadro unico: le righe non spuntate
+              vengono esportate lo stesso, come quadri a sé. Per escluderle davvero usa i filtri.
+            </p>
             {cumulaFuoriVista > 0 && (
               <p className="text-xs text-amber-700 mt-1">
                 Altre {cumulaFuoriVista} righe spuntate non rientrano nei filtri attuali: non sono in questi
@@ -735,7 +774,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                     title={Array.from(values).join(', ')}
                   >
                     <button type="button" className="hover:underline" onClick={() => setOpenFilter(col)}>
-                      {E0V1_MAP[col] ?? col}: {values.size === 1 ? (Array.from(values)[0] || '(vuoto)') : `${values.size} valori`}
+                      {col}: {values.size === 1 ? (Array.from(values)[0] || '(vuoto)') : `${values.size} valori`}
                     </button>
                     <button
                       type="button"
@@ -766,10 +805,14 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               <tr>
                 <th
                   className="px-2 py-2 text-center whitespace-nowrap sticky left-0 z-30 bg-blue-700 w-10"
-                  title="Righe da cumulare in un unico V1C5"
+                  title="Righe da fondere in un unico quadro"
                 >&#8721;</th>
                 <th
-                  className="px-3 py-2 text-left whitespace-nowrap sticky left-10 z-30 bg-blue-700"
+                  className="px-2 py-2 text-center whitespace-nowrap sticky left-10 z-30 bg-blue-700 w-10"
+                  title="Escludi la riga dall'export"
+                >&#10005;</th>
+                <th
+                  className="px-3 py-2 text-left whitespace-nowrap sticky left-20 z-30 bg-blue-700"
                   title="Riga nel file INPS di origine"
                 >Riga</th>
                 {visibleCols.map(col => {
@@ -777,10 +820,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                   return (
                     <th key={col} className="px-3 py-2 text-left whitespace-nowrap">
                       <span className="inline-flex items-center gap-1">
-                        <span>
-                          {E0V1_MAP[col] ? <span className="font-bold">{E0V1_MAP[col]}</span> : col}
-                          {E0V1_MAP[col] && <span className="ml-1 opacity-70 text-xs">{col}</span>}
-                        </span>
+                        <span>{col}</span>
                         <button
                           type="button"
                           onClick={() => setOpenFilter(prev => (prev === col ? null : col))}
@@ -819,11 +859,22 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                           type="checkbox"
                           checked={spuntata}
                           onChange={() => toggleCumula(entry.row!.__id)}
-                          title="Cumula questa riga nel V1C5"
+                          title="Fondi questa riga nel quadro unico"
                         />
                       )}
                     </td>
-                    <td className={`px-3 py-1 border-b border-gray-100 tabular-nums text-gray-400 whitespace-nowrap sticky left-10 z-10 ${sfondo}`}>
+                    <td className={`px-2 py-1 border-b border-gray-100 text-center sticky left-10 z-10 ${sfondo}`}>
+                      {!isSub && (
+                        <input
+                          type="checkbox"
+                          checked={false}
+                          onChange={() => toggleEsclusa(entry.row!.__id)}
+                          title="Escludi questa riga dall'export"
+                          className="accent-rose-600"
+                        />
+                      )}
+                    </td>
+                    <td className={`px-3 py-1 border-b border-gray-100 tabular-nums text-gray-400 whitespace-nowrap sticky left-20 z-10 ${sfondo}`}>
                       {isSub ? '' : entry.row!.__id}
                     </td>
                     {visibleCols.map(col => {
@@ -839,7 +890,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               })}
               {pageEntries.length === 0 && (
                 <tr>
-                  <td colSpan={visibleCols.length + 2} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={visibleCols.length + 3} className="px-3 py-6 text-center text-gray-400">
                     Nessuna riga corrisponde ai filtri.
                   </td>
                 </tr>

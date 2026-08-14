@@ -9,6 +9,7 @@ import {
   codiceCessazioneOf,
   codiciFiscaliDi,
   parseEnte,
+  percPartTimeOf,
   tipoPartTimeOf,
   toIsoDate,
   toItalian,
@@ -251,7 +252,7 @@ describe('spezzatura al cambio di inquadramento', () => {
     const periodi = p.dipendenti[0].periodi;
     expect(periodi).toHaveLength(1);
     // ignorata ai fini della spezzatura, non cancellata dal quadro
-    expect(periodi[0].PercPartTime).toBe('50');
+    expect(periodi[0].PercPartTime).toBe('50000');
   });
 
   it('considera la percentuale part time dal 2020', () => {
@@ -493,11 +494,79 @@ describe('normalizzazioni verso lo XSD', () => {
     expect(q.CodiceCessazione).toBe('');
   });
 
+  it('la percentuale part time esce nel formato intero del DMA2', () => {
+    // 66,67% nel flusso reale accettato da INPS si dichiara "66670".
+    expect(percPartTimeOf('66.67')).toBe('66670');
+    expect(percPartTimeOf('94.44')).toBe('94440');
+    expect(percPartTimeOf('50.00')).toBe('50000');
+    expect(percPartTimeOf('83,33')).toBe('83330');
+    expect(percPartTimeOf('')).toBe('');
+    // già in forma DMA2: non si riscala una seconda volta
+    expect(percPartTimeOf('66670')).toBe('66670');
+  });
+
+  it('riscala la percentuale part time letta dal file', () => {
+    const rows = [mese(1, '01/10/2021', '31/10/2021', {
+      'Tipo impiego': '18 - Part-time (contratto a tempo determinato)',
+      'Percentuale part time': '94.44',
+    })];
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+    expect(q.PercPartTime).toBe('94440');
+    expect(q.hasPartTime).toBe(true);
+  });
+
   it('il tipo part time orizzontale esce come P, mai come O', () => {
     expect(tipoPartTimeOf('P ORIZZONTALE')).toBe('P');
     expect(tipoPartTimeOf('O')).toBe('P');
     expect(tipoPartTimeOf('V VERTICALE')).toBe('V');
     expect(tipoPartTimeOf('')).toBe('');
+  });
+});
+
+describe('quadri causale 5 in conflitto sullo stesso periodo', () => {
+  /* Caso reale: un E0 superato ("Spento") rimasto nei filtri accanto al V1 che
+     lo aveva già corretto. Due C5 sullo stesso periodo: il secondo sostituisce
+     il primo e il lavoro di cumulo va perso, senza che nulla lo segnali. */
+  const caso = () => [
+    row(6, {
+      'Codice fiscale': 'MNNSFN76C16F943U',
+      'Data Inizio Periodo': '01/10/2021', 'Data Fine Periodo': '14/10/2021',
+      'Denuncia': '2021 - Ottobre', 'Tipologia': 'E0',
+      'Tipo impiego': '18 - Part-time', 'Tipo Servizio': '4 - Ordinario',
+      'Qualifica': '058000', 'Imponibile': '5522.03', 'Totale Contributi': '1802.94',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+    row(7, {
+      'Codice fiscale': 'MNNSFN76C16F943U',
+      'Data Inizio Periodo': '01/10/2021', 'Data Fine Periodo': '14/10/2021',
+      'Denuncia': '2021 - Dicembre', 'Tipologia': 'V1', 'Causale Variazione': '5',
+      'Tipo impiego': '18 - Part-time', 'Tipo Servizio': '4 - Ordinario',
+      'Qualifica': '058000', 'Imponibile': '5522.03', 'Totale Contributi': '1802.94',
+      'Codice Motivo Cessazione': '18 Fine incarico',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+  ];
+
+  it('segnala i due quadri che si sovrappongono', () => {
+    const rows = caso();
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5', new Set([7]));
+    expect(p.dipendenti[0].periodi).toHaveLength(2);
+    const avviso = p._avvisi.find(a => a.includes('stesso periodo'));
+    expect(avviso).toBeTruthy();
+    expect(avviso).toContain('2021-10-01 → 2021-10-14');
+    expect(avviso).toContain('sostituisce');
+  });
+
+  it('non segnala nulla quando i periodi sono distinti', () => {
+    const rows = [mese(1, '01/10/2021', '31/10/2021'), mese(2, '01/11/2021', '30/11/2021')];
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5');
+    expect(p._avvisi.join(' ')).not.toContain('stesso periodo');
+  });
+
+  it('non riguarda le altre causali, che non sostituiscono', () => {
+    const rows = caso();
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '1');
+    expect(p._avvisi.join(' ')).not.toContain('stesso periodo');
   });
 });
 

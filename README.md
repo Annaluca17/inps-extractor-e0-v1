@@ -74,6 +74,24 @@ lavorato**. Ma distinguere un E0 fuori posto — un errore del comune — da una
 riassunzione, per esempio uno stagionale, non è deducibile dal file: lo decide
 l'operatore.
 
+Le due colonne di spunta fanno cose diverse e indipendenti:
+
+| colonna | cosa fa |
+|---|---|
+| **∑** | fonde la riga nel quadro unico. Non decide se esportarla: le righe non spuntate escono comunque, come quadri a sé |
+| **✕** | toglie la riga dall'export |
+
+I filtri lavorano per valore e non bastano da soli: un doppione da scartare e
+la riga buona possono avere lo stesso stato e lo stesso periodo, e nessun
+filtro sa distinguerli. Serve anche il contrario — tenere una riga *Spento*
+perché serve nella somma, e insieme buttare una *Corrente* ripetuta. La
+colonna ✕ copre entrambi i casi.
+
+L'esclusione manuale passa dalla stessa partizione dei filtri: la riga compare
+nel registro con il motivo «esclusa a mano dall'operatore», il conteggio
+`tenute + escluse = righe nel foglio` continua a tornare, e da lì si
+**ripristina** con un clic, singolarmente o tutte insieme.
+
 Nella tabella ogni riga ha una casella nella colonna **∑**. Le righe spuntate
 confluiscono in un **unico V1C5**: periodo di riferimento quello della riga che
 porta il codice cessazione (in mancanza, la più antica fra le scelte), importi
@@ -101,6 +119,11 @@ rivelate sbagliate sui flussi realmente accettati da INPS.
 La terna di fine servizio è **TC7 in regime TFS e TC8 in regime TFR**: sono
 gestioni distinte e la congruità le confronta separate.
 
+La **percentuale part-time** viene riscalata: il DMA2 la vuole come intero, cioè
+la percentuale con tre decimali e senza separatore — 66,67% si dichiara `66670`
+— mentre PASSWEB la espone come decimale (`66.67`). Passarla così com'è
+produrrebbe un valore cento volte più piccolo del dovuto.
+
 L'imponibile del Fondo Credito si legge da `Imponibile Credito` oppure, sulle
 righe più vecchie che usano l'altro tracciato, da `Imponibile Credito/ENPDEP`;
 se non c'è né l'una né l'altra rispecchia l'imponibile pensionistico, perché è
@@ -124,6 +147,22 @@ I quadri aggregati si spezzano quando cambia l'inquadramento:
 sui **codici**, non sulle descrizioni — `056000` e `056000 POSIZIONE ECONOMICA
 DI ACCESSO C1` sono la stessa qualifica e non spezzano.
 
+### Quadri causale 5 in conflitto
+
+Due quadri C5 sullo stesso periodo si annullano a vicenda: la C5 sostituisce il
+dichiarato, INPS li elabora in sequenza e l'ultimo vince. Il file resta
+formalmente valido, quindi l'errore non si vede — ma il lavoro fatto sul primo
+quadro va perso.
+
+Il caso tipico è una riga già superata rimasta nei filtri accanto al V1 che
+l'aveva corretta: nei file PASSWEB l'E0 sostituito resta presente con stato
+**Spento**. Filtrare su *Corrente* lo toglie di mezzo. Se accade comunque, il
+fatto finisce in `_avvisi` con i numeri di riga dei quadri coinvolti.
+
+Il controllo riguarda i periodi identici. Le sovrapposizioni parziali non sono
+segnalate: lì la scelta dipende da cosa si vuole sostituire, e non è deducibile
+dal file.
+
 Gli anni riprodotti interi per la presenza di un V1C1 non si spezzano mai: se
 al loro interno l'inquadramento varia, il quadro ne porta un solo valore e la
 cosa finisce in `_avvisi`.
@@ -141,9 +180,10 @@ La tabella ha un **schermo intero** (ESC per uscire) e il numero di righe per
 pagina è regolabile fino a mostrarle tutte: sui file da un dipendente, che sono
 il caso normale, si vede l'intero periodo senza cambiare pagina.
 
-Le colonne **∑** e **Riga** restano bloccate a sinistra durante lo scorrimento
-orizzontale: con ottanta colonne attive, la casella da spuntare sarebbe
-altrimenti la prima cosa a sparire proprio mentre si leggono gli importi.
+Le colonne **∑**, **✕** e **Riga** restano bloccate a sinistra durante lo
+scorrimento orizzontale: con ottanta colonne attive, le caselle da spuntare
+sarebbero altrimenti la prima cosa a sparire proprio mentre si leggono gli
+importi.
 
 Spuntando le righe nella colonna ∑, una barra mostra i **totali delle righe
 selezionate** — imponibile, contributi, TFS/TFR, credito — che è la somma che
@@ -190,11 +230,13 @@ Nessun dato del file viene salvato: solo i nomi delle colonne scelte.
   coda in entrambe le direzioni, per non mescolarsi ai dati validi.
 - **Colonna `Riga`** in testa, con il numero di riga del file INPS di origine:
   permette di risalire alla riga sorgente di qualunque valore.
-- **Intestazioni brevi**: la sigla quando esiste (`CF`, `DT_INIZ`, `IMP`…),
-  altrimenti il nome originale. Le larghezze sono calcolate sul dato e non
-  sull'intestazione, che può allargare la colonna solo fino a 14 caratteri:
-  nei tracciati PASSWEB l'intestazione è più lunga del contenuto in 66 colonne
-  su 80, e lasciarla comandare produceva colonne larghissime e mezze vuote.
+- **Intestazioni identiche al file INPS**: il nome della colonna resta quello
+  di origine, senza sigle. L'export deve poter essere confrontato a occhio con
+  il file di partenza, che è il primo controllo che si fa. Le larghezze sono
+  calcolate sul dato e non sull'intestazione, che può allargare la colonna solo
+  fino a 14 caratteri: nei tracciati PASSWEB l'intestazione è più lunga del
+  contenuto in 66 colonne su 80, e lasciarla comandare produceva colonne
+  larghissime e mezze vuote.
 - **Filtro automatico** sulla riga di intestazione.
 - **Subtotali come formula** `SUBTOTAL(9;intervallo)`. Aggiungendo o togliendo
   righe in Excel i totali si aggiornano; le righe nascoste dal filtro non

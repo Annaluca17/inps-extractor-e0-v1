@@ -40,7 +40,14 @@ export class IntegrityError extends Error {
 // Mappa colonne
 // ---------------------------------------------------------------------------
 
-/** Chiave = nome colonna nel file INPS, valore = etichetta breve. */
+/**
+ * Colonne principali del tracciato E0/V1, con la sigla storica.
+ *
+ * Le sigle non vengono più usate come intestazione — né a schermo né
+ * nell'export, dove vale il nome originale del file. La mappa resta perché
+ * definisce quali sono le colonne principali (`DEFAULT_COLUMNS`, la selezione
+ * rapida) e quali segnalare se mancano dal foglio.
+ */
 export const E0V1_MAP: Record<string, string> = {
   'Codice fiscale': 'CF',
   'Data Inizio Periodo': 'DT_INIZ',
@@ -576,6 +583,15 @@ export interface QuadriFilter {
    * ammessi. Un insieme vuoto equivale a nessun filtro su quella colonna.
    */
   columnFilters?: ReadonlyMap<string, ReadonlySet<string>>;
+  /**
+   * Righe escluse a mano dall'operatore, per numero di riga del file.
+   *
+   * I filtri ragionano per valore e non bastano: un doppione da scartare e la
+   * riga buona possono avere lo stesso stato e lo stesso periodo. L'esclusione
+   * puntuale passa comunque da `partitionRows`, quindi finisce nel registro
+   * con il suo motivo e resta soggetta alle stesse invarianti.
+   */
+  escluseManuali?: ReadonlySet<number>;
 }
 
 export interface QuadriColumns {
@@ -641,6 +657,9 @@ export function filterQuadri(
   const toK = filter.to ? ymKey(filter.to) : null;
 
   const part = partitionRows(rows, row => {
+    // Prima di ogni criterio: la scelta esplicita dell'operatore prevale, e
+    // deve restare leggibile nel registro come tale.
+    if (filter.escluseManuali?.has(row.__id)) return 'esclusa a mano dall\'operatore';
     if (wantPeriod && cols.data) {
       const ym = yearMonthOfRow(row, cols.data);
       if (!ym) return 'data inizio periodo non interpretabile';
@@ -872,12 +891,17 @@ export interface SheetSpec {
 export const ROW_ID_HEADER = 'Riga';
 
 /**
- * Intestazione usata nel file esportato: solo la sigla breve quando esiste
- * (`CF`, `DT_INIZ`, …), altrimenti il nome originale. Le descrizioni lunghe
- * fra parentesi allargavano le colonne ben oltre il dato contenuto.
+ * Intestazione usata nel file esportato: il nome della colonna come sta nel
+ * file INPS di origine.
+ *
+ * Le sigle brevi (`CF`, `DT_INIZ`, …) sono state tolte: rendevano l'export non
+ * confrontabile a occhio con il file di partenza, che è il primo controllo che
+ * si fa. La larghezza resta calcolata sul dato, con l'intestazione che può
+ * allargare la colonna solo entro un limite, quindi i nomi lunghi non
+ * producono colonne sproporzionate.
  */
 export function columnLabel(column: string): string {
-  return E0V1_MAP[column] ?? column;
+  return column;
 }
 
 export interface ExportOptions {
