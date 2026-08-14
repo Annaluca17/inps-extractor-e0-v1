@@ -33,7 +33,7 @@ import {
   missingPresetColumns,
   saveColumnPreset,
 } from '../lib/preferences';
-import { type Causale, CAUSALI, buildUniemensPayload, downloadPayload } from '../lib/uniemens';
+import { type Causale, CAUSALI, buildUniemensPayload, downloadPayload, riferimentoCumulo, toIsoDate } from '../lib/uniemens';
 import ColumnFilterPanel from './ColumnFilterPanel';
 import { Alert, Card, Chip, ResetChip, formatInt } from './ui';
 
@@ -156,10 +156,23 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const [exportError, setExportError] = useState<string>('');
   const [causale, setCausale] = useState<Causale>('5');
 
+  // Righe da fondere in un unico quadro: i pagamenti successivi alla
+  // cessazione vanno sommati all'ultimo mese lavorato, ma solo l'operatore sa
+  // se un E0 fuori posto è un errore o una riassunzione.
+  const [cumula, setCumula] = useState<Set<number>>(new Set());
+  const toggleCumula = (id: number) => setCumula(prev => {
+    const s = new Set(prev);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    return s;
+  });
+
+  const righeCumulate = useMemo(() => keptRows.filter(r => cumula.has(r.__id)), [keptRows, cumula]);
+  const rifCumulo = useMemo(() => riferimentoCumulo(righeCumulate, cols), [righeCumulate, cols]);
+
   const handleExportJson = () => {
     setExportError('');
     try {
-      const payload = buildUniemensPayload(keptRows, sheet, cols, causale);
+      const payload = buildUniemensPayload(keptRows, sheet, cols, causale, cumula);
       downloadPayload(payload, `uniemens-c${causale}.json`);
     } catch (err) {
       setExportError(`Export JSON non riuscito: ${err instanceof Error ? err.message : String(err)}`);
@@ -568,6 +581,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
           <table className="min-w-full text-sm">
             <thead className="bg-blue-700 text-white sticky top-0">
               <tr>
+                <th className="px-2 py-2 text-center whitespace-nowrap" title="Righe da cumulare in un unico V1C5">&#8721;</th>
                 <th className="px-3 py-2 text-left whitespace-nowrap" title="Riga nel file INPS di origine">Riga</th>
                 {visibleCols.map(col => {
                   const filtered = columnFilters.has(col);
@@ -606,6 +620,16 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                       ? 'bg-amber-50 font-semibold border-t-2 border-amber-300'
                       : (i % 2 === 0 ? 'bg-white' : 'bg-gray-50')}
                   >
+                    <td className="px-2 py-1 border-b border-gray-100 text-center">
+                      {!isSub && (
+                        <input
+                          type="checkbox"
+                          checked={cumula.has(entry.row!.__id)}
+                          onChange={() => toggleCumula(entry.row!.__id)}
+                          title="Cumula questa riga nel V1C5"
+                        />
+                      )}
+                    </td>
                     <td className="px-3 py-1 border-b border-gray-100 tabular-nums text-gray-400 whitespace-nowrap">
                       {isSub ? '' : entry.row!.__id}
                     </td>
@@ -622,7 +646,7 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               })}
               {pageEntries.length === 0 && (
                 <tr>
-                  <td colSpan={visibleCols.length + 1} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={visibleCols.length + 2} className="px-3 py-6 text-center text-gray-400">
                     Nessuna riga corrisponde ai filtri.
                   </td>
                 </tr>
@@ -667,6 +691,31 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               formula, aggiungendo o togliendo righe in Excel i totali si aggiornano da soli, e le righe nascoste
               dal filtro non vengono conteggiate.
             </p>
+            {cumula.size > 0 && (
+              <div className="text-sm bg-amber-50 border border-amber-300 rounded-lg px-3 py-2 max-w-xl">
+                <span className="font-semibold text-amber-900">
+                  &#8721; {cumula.size} righe da cumulare in un unico V1C5
+                </span>
+                {rifCumulo && (
+                  <span className="text-amber-800">
+                    {' '}· riferimento{' '}
+                    <span className="font-mono">
+                      {toIsoDate(textOf(rifCumulo, cols.data))} → {toIsoDate(textOf(rifCumulo, cols.dataFine))}
+                    </span>
+                    {' '}(riga {rifCumulo.__id})
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setCumula(new Set())}
+                  className="ml-2 underline text-amber-700 hover:text-amber-900"
+                >azzera</button>
+                <p className="text-xs text-amber-700 mt-1">
+                  Importi sommati sul periodo di riferimento, un ente versante per ogni mese di pagamento.
+                  Vale solo per la causale 5.
+                </p>
+              </div>
+            )}
           </div>
           <div className="flex flex-col items-end gap-2">
             <div className="flex items-center gap-2">
