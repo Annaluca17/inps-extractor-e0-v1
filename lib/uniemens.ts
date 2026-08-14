@@ -15,15 +15,22 @@
  *   erogazione — il caso in cui l'ente versante serve — ma non è la stessa
  *   cosa. Resta un valore da controllare, non da firmare a scatola chiusa.
  *
- * — Periodi dal 10/2012: un quadro per mese, con un ente versante per ogni
- *   mese di pagamento diverso da quello di competenza (se il pagamento cade
- *   nel mese stesso l'ente versante non serve e non viene emesso).
- *   Periodi fino al 09/2012: un quadro aggregato per anno. Se l'anno contiene
- *   un V1C1 esce intero con un ente versante per ciascun mese di pagamento;
- *   altrimenti si cumula senza enti versanti.
+ * — L'aggregazione dei quadri dipende dal periodo: dal 10/2012 un quadro per
+ *   mese, prima un quadro per anno (intero se l'anno contiene un V1C1,
+ *   altrimenti cumulato). Gli enti versanti invece si emettono sempre, una
+ *   terna per ciascun mese di pagamento, compreso il mese di competenza: la
+ *   somma degli EnteVersante deve quadrare al centesimo con le gestioni
+ *   dichiarate, altrimenti INPS respinge il quadro (00171I / 00032I).
+ *   Verificato su flussi reali accettati, sia mono-mese sia annuali.
+ *
+ * — La terna di fine servizio è TC7 in regime TFS e TC8 in regime TFR: sono
+ *   gestioni distinte e il controllo di congruità le confronta separate.
  *
  * — La causale la sceglie l'operatore: non è derivabile dal file.
  *   C1 aggiunge al dichiarato, C5 lo sostituisce, C6 lo cancella.
+ *
+ * — Cognome, nome, comune, CAP e frontespizio non esistono nel tracciato
+ *   PASSWEB: li digita l'operatore e viaggiano solo in questo JSON.
  */
 import {
   type InpsRow,
@@ -111,6 +118,57 @@ export interface BuilderDipendente {
   periodi: BuilderPeriodo[];
 }
 
+/**
+ * Dati del lavoratore che il tracciato PASSWEB non contiene ma che l'XML
+ * pretende: `Cognome` e `Nome` sono obbligatori, comune e CAP compongono
+ * `DatiSedeLavoro`. Li digita l'operatore, per codice fiscale.
+ */
+export interface AnagraficaDipendente {
+  Cognome: string;
+  Nome: string;
+  CodiceComune: string;
+  CAP: string;
+}
+
+/** Intestazione della denuncia: nel file INPS non c'è, la digita l'operatore. */
+export interface Mittente {
+  CFPersonaMittente: string;
+  RagSocMittente: string;
+  CFMittente: string;
+  CFSoftwarehouse: string;
+  SedeINPS: string;
+}
+
+export interface AziendaDenuncia {
+  AnnoMeseDenuncia: string;
+  CFAzienda: string;
+  RagSocAzienda: string;
+  PRGAZIENDA: string;
+  CFRappresentanteFirmatario: string;
+  ISTAT: string;
+  FormaGiuridica: string;
+}
+
+export const MITTENTE_VUOTO: Mittente = {
+  CFPersonaMittente: '', RagSocMittente: '', CFMittente: '',
+  CFSoftwarehouse: '00000000000', SedeINPS: '',
+};
+
+export const AZIENDA_VUOTA: AziendaDenuncia = {
+  AnnoMeseDenuncia: '', CFAzienda: '', RagSocAzienda: '', PRGAZIENDA: '00000',
+  CFRappresentanteFirmatario: '', ISTAT: '', FormaGiuridica: '2430',
+};
+
+/**
+ * Quanto l'operatore aggiunge a mano prima dell'export JSON. Non tocca
+ * l'export XLSX, che resta la trascrizione fedele del file INPS.
+ */
+export interface DatiAggiuntivi {
+  anagrafica?: ReadonlyMap<string, AnagraficaDipendente>;
+  mittente?: Mittente;
+  azienda?: AziendaDenuncia;
+}
+
 export interface BuilderPayload {
   _formato: 'uniemens-builder-import';
   _versione: 1;
@@ -119,6 +177,9 @@ export interface BuilderPayload {
   _causale: Causale;
   /** Incongruenze rilevate: nel file, non nell'interfaccia. */
   _avvisi: string[];
+  /** Frontespizio digitato dall'operatore; assente se non compilato. */
+  _mittente?: Mittente;
+  _azienda?: AziendaDenuncia;
   dipendenti: BuilderDipendente[];
 }
 
@@ -132,6 +193,24 @@ function uid(): string {
 export function codeToken(value: string): string {
   const t = value.trim().split(/\s+/)[0] ?? '';
   return t.replace(/[-–]$/, '');
+}
+
+/**
+ * Lo XSD DMA2 ammette solo P / V / M. La voce "orizzontale" compare anche
+ * come `O` nei flussi, che l'XSD rifiuta: vale come P.
+ */
+export function tipoPartTimeOf(value: string): string {
+  const t = codeToken(value).toUpperCase();
+  return t === 'O' ? 'P' : t;
+}
+
+/**
+ * Codice motivo cessazione. Il tracciato usa `0` per dire "nessuna
+ * cessazione": è un riempitivo, non un codice, e non va dichiarato.
+ */
+export function codiceCessazioneOf(value: string): string {
+  const c = codeToken(value);
+  return c === '0' ? '' : c;
 }
 
 /** "COMUNE DI NOTO 00195880893 00000" → CF azienda + progressivo. */
@@ -166,6 +245,26 @@ function sum(rows: readonly InpsRow[], column: string | null): number | null {
   return any ? Math.round(total * 100) / 100 : null;
 }
 
+/**
+ * Somma prendendo, riga per riga, la prima colonna valorizzata.
+ *
+ * Serve dove lo stesso dato cambia colonna a seconda dell'epoca della riga:
+ * l'imponibile del Fondo Credito sta in `Imponibile Credito` sulle righe
+ * recenti e in `Imponibile Credito/ENPDEP` su quelle vecchie, e un file che
+ * copre molti anni le usa entrambe.
+ */
+function sumFirstOf(rows: readonly InpsRow[], columns: readonly (string | null)[]): number | null {
+  let total = 0;
+  let any = false;
+  for (const row of rows) {
+    for (const column of columns) {
+      const n = numberOf(row, column);
+      if (n != null) { total += n; any = true; break; }
+    }
+  }
+  return any ? Math.round(total * 100) / 100 : null;
+}
+
 interface MappedColumns {
   cf: string | null;
   tipoImpiego: string | null;
@@ -190,6 +289,7 @@ interface MappedColumns {
   ultElemTFR: string | null;
   contribUltElemTFR: string | null;
   impCredito: string | null;
+  impCreditoEnpdep: string | null;
   contribCredito: string | null;
   ente: string | null;
   causale: string | null;
@@ -222,6 +322,7 @@ function mapColumns(columns: readonly string[]): MappedColumns {
     ultElemTFR: r('Ulteriori Elementi Imp TFR'),
     contribUltElemTFR: r('Contributo Ulteriori Elementi Imp TFR'),
     impCredito: r('Imponibile Credito'),
+    impCreditoEnpdep: r('Imponibile Credito/ENPDEP'),
     contribCredito: r('Contributo Credito'),
     ente: r('Ente Dichiarante in Anagrafica', 'Dichiarante in denuncia'),
     causale: r('Causale Variazione'),
@@ -306,7 +407,6 @@ const INQ_LABEL: Record<string, string> = {
 
 interface Block {
   periodKey: string;
-  monoMese: boolean;
   inq: Inquadramento;
   rows: InpsRow[];
   /** Enti versanti per mese di pagamento: anni ante 10/2012 che contengono un V1C1. */
@@ -315,19 +415,28 @@ interface Block {
   cumuloManuale?: InpsRow;
 }
 
-/** Terna TC1 / TC9 / TC7 per un insieme di righe. */
+/**
+ * Terna TC1 / TC9 / fine servizio per un insieme di righe.
+ *
+ * Il tipo contributo del fine servizio dipende dal regime del quadro: TC7 per
+ * il TFS, TC8 per il TFR. Sono gestioni distinte — la validazione del builder
+ * confronta Σ TC7 con `ImponibileTFS` e Σ TC8 con `ImponibileTFR`, quindi una
+ * terna col codice sbagliato lascia scoperta la gestione dichiarata.
+ */
 function enteVersanteSet(
   rows: readonly InpsRow[],
   m: MappedColumns,
   ente: { CFAzienda: string; PRGAZIENDA: string },
   annoMese: string,
+  regimeTFS: 'TFS' | 'TFR',
 ): EnteVersanteRow[] {
   const impCPDEL = sum(rows, m.imponibile);
   const contribCPDEL = sum(rows, m.contributi);
-  const impCredito = sum(rows, m.impCredito);
+  const impCredito = sumFirstOf(rows, [m.impCredito, m.impCreditoEnpdep]);
   const contribCredito = sum(rows, m.contribCredito);
-  const impTFS = sum(rows, m.impTFS) ?? sum(rows, m.impTFR);
-  const contribTFS = sum(rows, m.contribTFS) ?? sum(rows, m.contribTFR);
+  const isTFR = regimeTFS === 'TFR';
+  const impFineServizio = sum(rows, isTFR ? m.impTFR : m.impTFS);
+  const contribFineServizio = sum(rows, isTFR ? m.contribTFR : m.contribTFS);
 
   const base = { CFAzienda: ente.CFAzienda, PRGAZIENDA: ente.PRGAZIENDA, AnnoMeseErogazione: annoMese, Aliquota: '2' };
   const out: EnteVersanteRow[] = [];
@@ -336,8 +445,8 @@ function enteVersanteSet(
 
   out.push({ id: t1, TipoContributo: '1', ...base, Imponibile: toItalian(impCPDEL), Contributo: toItalian(contribCPDEL), pairedTc9: t9 });
   out.push({ id: t9, TipoContributo: '9', ...base, Imponibile: toItalian(impCredito ?? impCPDEL), Contributo: toItalian(contribCredito), pairedWith: t1 });
-  if (impTFS != null && impTFS !== 0) {
-    out.push({ id: uid(), TipoContributo: '7', ...base, Imponibile: toItalian(impTFS), Contributo: toItalian(contribTFS) });
+  if (impFineServizio != null && impFineServizio !== 0) {
+    out.push({ id: uid(), TipoContributo: isTFR ? '8' : '7', ...base, Imponibile: toItalian(impFineServizio), Contributo: toItalian(contribFineServizio) });
   }
   return out;
 }
@@ -351,27 +460,26 @@ function enteVersanteSet(
  * non è la stessa cosa, quindi resta un valore da controllare nel builder,
  * non da firmare a scatola chiusa.
  *
- * `escludiMese` è il mese del periodo stesso: sui quadri mono-mese l'ente
- * versante serve solo quando il pagamento cade in un mese diverso da quello di
- * competenza, quindi le terne che coinciderebbero col periodo non si emettono.
+ * Nessun mese viene escluso, nemmeno quello di competenza del quadro: la somma
+ * delle terne deve ricostruire per intero gli imponibili dichiarati, e una
+ * terna omessa diventa un residuo che INPS contesta.
  */
 function enteVersantePerMesePagamento(
   rows: readonly InpsRow[],
   m: MappedColumns,
   ente: { CFAzienda: string; PRGAZIENDA: string },
-  escludiMese: string | null,
+  regimeTFS: 'TFS' | 'TFR',
 ): EnteVersanteRow[] {
   const perMese = new Map<string, InpsRow[]>();
   for (const row of rows) {
     const ym = parseYearMonth(textOf(row, m.denuncia));
     const key = ym ? `${ym.year}-${String(ym.month).padStart(2, '0')}` : '';
-    if (escludiMese && key === escludiMese) continue;
     const arr = perMese.get(key);
     if (arr) arr.push(row); else perMese.set(key, [row]);
   }
   const mesi = Array.from(perMese.keys()).sort();
   const out: EnteVersanteRow[] = [];
-  for (const mese of mesi) out.push(...enteVersanteSet(perMese.get(mese)!, m, ente, mese));
+  for (const mese of mesi) out.push(...enteVersanteSet(perMese.get(mese)!, m, ente, mese, regimeTFS));
   return out;
 }
 
@@ -385,10 +493,7 @@ export function riferimentoCumulo(
   cols: QuadriColumns,
 ): InpsRow | null {
   if (rows.length === 0) return null;
-  const conCessazione = rows.filter(r => {
-    const c = codeToken(textOf(r, cols.cessazione));
-    return c !== '' && c !== '0';
-  });
+  const conCessazione = rows.filter(r => codiceCessazioneOf(textOf(r, cols.cessazione)) !== '');
   const candidati = conCessazione.length > 0 ? conCessazione : rows;
   return candidati.reduce((best, r) =>
     toIsoDate(textOf(r, cols.data)) < toIsoDate(textOf(best, cols.data)) ? r : best);
@@ -406,10 +511,20 @@ export function buildUniemensPayload(
    * (gli stagionali) non è deducibile dal file, quindi lo dice l'operatore.
    */
   cumula: ReadonlySet<number> = new Set(),
+  /**
+   * Anagrafica e frontespizio digitati dall'operatore: il tracciato PASSWEB
+   * non li contiene e l'XML non può farne a meno.
+   */
+  extra: DatiAggiuntivi = {},
 ): BuilderPayload {
   counter = 0;
   const m = mapColumns(sheet.columns);
   const avvisi: string[] = [];
+  const isC6 = causale === '6';
+  const isC1 = causale === '1';
+  // Solo la C5 porta gli enti versanti: la C6 cancella e la C1 aggiunge
+  // denaro nuovo, che nel file non c'è.
+  const emetteEnteVersante = !isC6 && !isC1;
 
   // Un dipendente per codice fiscale, nell'ordine di comparsa.
   const perCf = new Map<string, InpsRow[]>();
@@ -460,7 +575,6 @@ export function buildUniemensPayload(
       const periodKey = periodKeyOf(rif, cols.data) ?? 'M';
       blocks.push({
         periodKey,
-        monoMese: true,
         inq: inquadramentoOf(rif, m),
         rows: daCumulare,
         evPerMesePagamento: false,
@@ -490,7 +604,6 @@ export function buildUniemensPayload(
         }
         current = {
           periodKey,
-          monoMese: periodKey.startsWith('M'),
           inq,
           rows: [],
           evPerMesePagamento: annoIntero,
@@ -506,7 +619,6 @@ export function buildUniemensPayload(
 
     for (const block of blocks) {
       const blockRows = block.rows;
-      const monoMese = block.monoMese;
       // Estremi effettivi del blocco.
       let giornoInizio: string;
       let giornoFine: string;
@@ -527,11 +639,15 @@ export function buildUniemensPayload(
       const ref = block.cumuloManuale ?? blockRows[blockRows.length - 1];
       const inq = block.inq;
       const ente = parseEnte(textOf(ref, m.ente));
-      if (block.evPerMesePagamento) {
+      // Vale per ogni quadro che porta enti versanti, non solo per gli anni
+      // riprodotti interi: senza mese la terna resta fuori dall'XML.
+      if (emetteEnteVersante) {
         const senzaDenuncia = blockRows.filter(r => parseYearMonth(textOf(r, m.denuncia)) == null);
         if (senzaDenuncia.length > 0) {
           avvisi.push(`${cf} ${block.periodKey.slice(1)}: ${senzaDenuncia.length} righe senza denuncia interpretabile (${senzaDenuncia.map(r => r.__id).join(', ')}); il relativo ente versante esce senza mese.`);
         }
+      }
+      if (block.evPerMesePagamento) {
         // L'anno esce intero perché contiene un V1C1: se l'inquadramento varia
         // al suo interno, il quadro ne porta comunque un solo valore.
         const annoBlocco = Number(block.periodKey.slice(1, 5));
@@ -550,9 +666,6 @@ export function buildUniemensPayload(
       const regimeTFS: 'TFS' | 'TFR' = (impTFR != null && impTFR !== 0) ? 'TFR' : 'TFS';
       const tipoImpiego = inq.tipoImpiego;
 
-      const isC6 = causale === '6';
-      const isC1 = causale === '1';
-
       const periodo: BuilderPeriodo = {
         id: uid(),
         tipoQuadro: 'V1',
@@ -567,7 +680,7 @@ export function buildUniemensPayload(
         // Non fanno parte dei criteri di spezzatura: si leggono dalla riga di
         // riferimento, non dall'inquadramento del blocco.
         Contratto: isC6 ? '' : codeToken(textOf(ref, m.contratto)),
-        TipoPartTime: isC6 ? '' : codeToken(textOf(ref, m.tipoPartTime)),
+        TipoPartTime: isC6 ? '' : tipoPartTimeOf(textOf(ref, m.tipoPartTime)),
         RegimeFineServizio: isC6 ? '' : codeToken(textOf(ref, m.regimeFineServizio)),
         hasPartTime: !isC6 && (tipoImpiego === '8' || tipoImpiego === '18'),
         GiorniUtiliFiniPensionistici: isC6 ? '' : textOf(ref, m.giorniUtili),
@@ -585,23 +698,24 @@ export function buildUniemensPayload(
         ImponibileTFRUlterioriElem: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.ultElemTFR)),
         ContributoTFRUlterioriElem: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.contribUltElemTFR)),
         RetribValutabileTFR: isC6 ? '' : toItalian(sum(blockRows, m.retribValutabileTFR)),
-        ImpCredito: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.impCredito)),
+        // Il Fondo Credito insiste sullo stesso imponibile della gestione
+        // pensionistica: quando il file non lo riporta si rispecchia, come già
+        // fanno le terne TC9 e come vuole il builder, che senza `ImpCredito`
+        // non emette `GestCredito` e lascia gli enti versanti scoperti.
+        ImpCredito: isC6 || isC1
+          ? ''
+          : toItalian(sumFirstOf(blockRows, [m.impCredito, m.impCreditoEnpdep]) ?? sum(blockRows, m.imponibile)),
         ContribCredito: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.contribCredito)),
-        CodiceCessazione: isC6 ? '' : codeToken(textOf(ref, cols.cessazione)),
+        CodiceCessazione: isC6 ? '' : codiceCessazioneOf(textOf(ref, cols.cessazione)),
         dmuDataAtto: '',
         dmuIdentAtto: '',
         dmuNumeroRegistro: '',
-        enteVersante: (isC6 || isC1)
-          ? []
-          : block.evPerMesePagamento
-            // Anno con V1C1: una terna per ogni mese di pagamento, tutte.
-            ? enteVersantePerMesePagamento(blockRows, m, ente, null)
-            : monoMese
-              // Quadro mensile: terne solo per i pagamenti caduti in un mese
-              // diverso da quello di competenza.
-              ? enteVersantePerMesePagamento(blockRows, m, ente, giornoInizio.slice(0, 7))
-              // Aggregato senza V1C1: si cumula, niente enti versanti.
-              : [],
+        // Una terna per ogni mese di pagamento, sempre: il quadro può essere
+        // mensile o annuale, ma gli imponibili vanno comunque ricostruiti per
+        // intero dalle terne.
+        enteVersante: emetteEnteVersante
+          ? enteVersantePerMesePagamento(blockRows, m, ente, regimeTFS)
+          : [],
         _righeOrigine: blockRows.map(r => r.__id),
       };
 
@@ -611,13 +725,20 @@ export function buildUniemensPayload(
     // Il blocco cumulato viene creato per primo: si riordina cronologicamente.
     periodi.sort((a, b) => (a.GiornoInizio < b.GiornoInizio ? -1 : a.GiornoInizio > b.GiornoInizio ? 1 : 0));
 
+    // Il tracciato PASSWEB non porta l'anagrafica: quella che c'è l'ha
+    // digitata l'operatore. Cognome e nome sono obbligatori nell'XML.
+    const ana = extra.anagrafica?.get(cf);
+    if (!ana?.Cognome || !ana?.Nome) {
+      avvisi.push(`${cf}: cognome e nome non compilati; il builder non può generare l'XML senza.`);
+    }
+
     dipendenti.push({
       id: uid(),
       CFLavoratore: cf,
-      Cognome: '',
-      Nome: '',
-      CodiceComune: '',
-      CAP: '',
+      Cognome: ana?.Cognome ?? '',
+      Nome: ana?.Nome ?? '',
+      CodiceComune: ana?.CodiceComune ?? '',
+      CAP: ana?.CAP ?? '',
       periodi,
     });
   }
@@ -629,8 +750,39 @@ export function buildUniemensPayload(
     _generatoIl: new Date().toISOString().slice(0, 10),
     _causale: causale,
     _avvisi: avvisi,
+    ...(extra.mittente ? { _mittente: extra.mittente } : {}),
+    ...(extra.azienda ? { _azienda: extra.azienda } : {}),
     dipendenti,
   };
+}
+
+/** Codici fiscali presenti nelle righe, nell'ordine di comparsa. */
+export function codiciFiscaliDi(rows: readonly InpsRow[], sheet: SheetData): string[] {
+  const cf = resolveColumn(sheet.columns, ['Codice fiscale']);
+  const out: string[] = [];
+  const visti = new Set<string>();
+  for (const row of rows) {
+    const v = textOf(row, cf);
+    if (v && !visti.has(v)) { visti.add(v); out.push(v); }
+  }
+  return out;
+}
+
+/**
+ * Dati dell'ente ricavabili dal file, per precompilare il frontespizio.
+ * La colonna dichiarante ha la forma "COMUNE DI NOTO 00195880893 00000".
+ */
+export function aziendaDalFile(rows: readonly InpsRow[], sheet: SheetData): Partial<AziendaDenuncia> {
+  const col = resolveColumn(sheet.columns, ['Ente Dichiarante in Anagrafica', 'Dichiarante in denuncia']);
+  for (const row of rows) {
+    const v = textOf(row, col);
+    if (!v) continue;
+    const { CFAzienda, PRGAZIENDA } = parseEnte(v);
+    if (!CFAzienda) continue;
+    const ragSoc = v.slice(0, v.indexOf(CFAzienda)).trim();
+    return { CFAzienda, PRGAZIENDA, RagSocAzienda: ragSoc };
+  }
+  return {};
 }
 
 /** Scarica il payload come file JSON. */

@@ -33,7 +33,21 @@ import {
   missingPresetColumns,
   saveColumnPreset,
 } from '../lib/preferences';
-import { type Causale, CAUSALI, buildUniemensPayload, downloadPayload, riferimentoCumulo, toIsoDate } from '../lib/uniemens';
+import {
+  type AnagraficaDipendente,
+  type AziendaDenuncia,
+  type Causale,
+  type Mittente,
+  AZIENDA_VUOTA,
+  CAUSALI,
+  MITTENTE_VUOTO,
+  aziendaDalFile,
+  buildUniemensPayload,
+  codiciFiscaliDi,
+  downloadPayload,
+  riferimentoCumulo,
+  toIsoDate,
+} from '../lib/uniemens';
 import ColumnFilterPanel from './ColumnFilterPanel';
 import { Alert, Card, Chip, ResetChip, formatInt } from './ui';
 
@@ -169,10 +183,47 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
   const righeCumulate = useMemo(() => keptRows.filter(r => cumula.has(r.__id)), [keptRows, cumula]);
   const rifCumulo = useMemo(() => riferimentoCumulo(righeCumulate, cols), [righeCumulate, cols]);
 
+  // Dati che il tracciato PASSWEB non contiene e che l'XML pretende. Valgono
+  // solo per l'export JSON: l'XLSX resta la trascrizione fedele del file INPS.
+  const [mostraAggiuntivi, setMostraAggiuntivi] = useState(false);
+  const [anagrafica, setAnagrafica] = useState<Record<string, AnagraficaDipendente>>({});
+  const [mittente, setMittente] = useState<Mittente>(MITTENTE_VUOTO);
+  const [azienda, setAzienda] = useState<AziendaDenuncia>(AZIENDA_VUOTA);
+
+  const cfPresenti = useMemo(() => codiciFiscaliDi(keptRows, sheet), [keptRows, sheet]);
+  const aziendaSuggerita = useMemo(() => aziendaDalFile(keptRows, sheet), [keptRows, sheet]);
+
+  const anagraficaDi = (cf: string): AnagraficaDipendente =>
+    anagrafica[cf] ?? { Cognome: '', Nome: '', CodiceComune: '', CAP: '' };
+  const setAnagraficaCampo = (cf: string, campo: keyof AnagraficaDipendente, valore: string) =>
+    setAnagrafica(prev => ({ ...prev, [cf]: { ...anagraficaDi(cf), [campo]: valore } }));
+
+  const anagraficaIncompleta = cfPresenti.filter(cf => {
+    const a = anagrafica[cf];
+    return !a?.Cognome?.trim() || !a?.Nome?.trim();
+  });
+
+  /** Precompila dal file ciò che il file sa già dire: CF ente, progressivo, ragione sociale. */
+  const precompilaAzienda = () => setAzienda(prev => ({ ...prev, ...aziendaSuggerita }));
+
+  const nonVuoto = <T extends object>(o: T): boolean =>
+    Object.values(o).some(v => typeof v === 'string' && v.trim() !== '');
+
   const handleExportJson = () => {
     setExportError('');
     try {
-      const payload = buildUniemensPayload(keptRows, sheet, cols, causale, cumula);
+      const compilate = new Map(
+        cfPresenti
+          .map(cf => [cf, anagrafica[cf]] as const)
+          .filter((e): e is [string, AnagraficaDipendente] => e[1] != null),
+      );
+      const payload = buildUniemensPayload(keptRows, sheet, cols, causale, cumula, {
+        anagrafica: compilate,
+        // Il frontespizio viaggia solo se l'operatore lo ha toccato: un
+        // frontespizio vuoto sovrascriverebbe quello già presente nel builder.
+        mittente: nonVuoto({ ...mittente, CFSoftwarehouse: '' }) ? mittente : undefined,
+        azienda: nonVuoto({ ...azienda, PRGAZIENDA: '', FormaGiuridica: '' }) ? azienda : undefined,
+      });
       downloadPayload(payload, `uniemens-c${causale}.json`);
     } catch (err) {
       setExportError(`Export JSON non riuscito: ${err instanceof Error ? err.message : String(err)}`);
@@ -735,6 +786,18 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
             </div>
             <button
               type="button"
+              onClick={() => setMostraAggiuntivi(v => !v)}
+              className="text-sm text-blue-700 hover:text-blue-900 underline"
+            >
+              {mostraAggiuntivi ? '▾' : '▸'} Dati per il builder
+              {anagraficaIncompleta.length > 0 && (
+                <span className="ml-1 text-amber-700">
+                  ({anagraficaIncompleta.length} da compilare)
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
               onClick={handleExport}
               disabled={keptRows.length === 0 || visibleCols.length === 0 || Boolean(integrityError)}
               className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
@@ -743,7 +806,132 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
             </button>
           </div>
         </div>
+
+        {mostraAggiuntivi && (
+          <div className="mt-4 pt-4 border-t border-gray-200 space-y-5">
+            <p className="text-sm text-gray-600 max-w-3xl">
+              Il tracciato PASSWEB non contiene l&apos;anagrafica del lavoratore né l&apos;intestazione
+              della denuncia, ma l&apos;XML non può farne a meno: si compilano qui. Valgono{' '}
+              <span className="font-semibold">solo per il file .json</span> — l&apos;export .xlsx resta la
+              trascrizione fedele del file INPS e non ne è toccato.
+            </p>
+
+            <div>
+              <h3 className="font-semibold text-gray-800 text-sm mb-2">
+                Anagrafica dei lavoratori{' '}
+                <span className="font-normal text-gray-500">
+                  ({cfPresenti.length} nelle righe selezionate)
+                </span>
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-500 text-xs uppercase tracking-wide">
+                      <th className="pr-3 pb-1 font-medium">Codice fiscale</th>
+                      <th className="pr-3 pb-1 font-medium">Cognome</th>
+                      <th className="pr-3 pb-1 font-medium">Nome</th>
+                      <th className="pr-3 pb-1 font-medium">Codice comune</th>
+                      <th className="pb-1 font-medium">CAP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cfPresenti.map(cf => {
+                      const a = anagraficaDi(cf);
+                      const manca = !a.Cognome.trim() || !a.Nome.trim();
+                      return (
+                        <tr key={cf}>
+                          <td className="pr-3 py-1 font-mono text-xs whitespace-nowrap">
+                            {cf}
+                            {manca && <span className="ml-1 text-amber-600" title="Cognome e nome sono obbligatori">•</span>}
+                          </td>
+                          <td className="pr-3 py-1">
+                            <CampoTesto value={a.Cognome} onChange={v => setAnagraficaCampo(cf, 'Cognome', v)} width="w-40" />
+                          </td>
+                          <td className="pr-3 py-1">
+                            <CampoTesto value={a.Nome} onChange={v => setAnagraficaCampo(cf, 'Nome', v)} width="w-40" />
+                          </td>
+                          <td className="pr-3 py-1">
+                            <CampoTesto value={a.CodiceComune} onChange={v => setAnagraficaCampo(cf, 'CodiceComune', v)} placeholder="L651" width="w-24" />
+                          </td>
+                          <td className="py-1">
+                            <CampoTesto value={a.CAP} onChange={v => setAnagraficaCampo(cf, 'CAP', v)} placeholder="98040" width="w-24" />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {anagraficaIncompleta.length > 0 && (
+                <p className="text-xs text-amber-700 mt-2">
+                  Cognome e nome mancanti per {anagraficaIncompleta.length} lavoratore/i: il JSON viene
+                  comunque prodotto, con l&apos;avviso dentro, ma il builder non genererà un XML valido.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <div className="flex items-baseline gap-3 mb-2">
+                <h3 className="font-semibold text-gray-800 text-sm">Intestazione della denuncia</h3>
+                {Object.keys(aziendaSuggerita).length > 0 && (
+                  <button type="button" onClick={precompilaAzienda} className="text-xs text-blue-700 underline hover:text-blue-900">
+                    riprendi l&apos;ente dal file
+                  </button>
+                )}
+              </div>
+              <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 max-w-4xl">
+                <Campo label="CF persona mittente" value={mittente.CFPersonaMittente} onChange={v => setMittente(p => ({ ...p, CFPersonaMittente: v }))} />
+                <Campo label="Ragione sociale mittente" value={mittente.RagSocMittente} onChange={v => setMittente(p => ({ ...p, RagSocMittente: v }))} />
+                <Campo label="CF mittente" value={mittente.CFMittente} onChange={v => setMittente(p => ({ ...p, CFMittente: v }))} />
+                <Campo label="CF softwarehouse" value={mittente.CFSoftwarehouse} onChange={v => setMittente(p => ({ ...p, CFSoftwarehouse: v }))} />
+                <Campo label="Sede INPS" value={mittente.SedeINPS} onChange={v => setMittente(p => ({ ...p, SedeINPS: v }))} placeholder="4800" />
+                <Campo label="Anno-mese denuncia" value={azienda.AnnoMeseDenuncia} onChange={v => setAzienda(p => ({ ...p, AnnoMeseDenuncia: v }))} placeholder="2026-01" />
+                <Campo label="CF azienda" value={azienda.CFAzienda} onChange={v => setAzienda(p => ({ ...p, CFAzienda: v }))} />
+                <Campo label="Ragione sociale ente" value={azienda.RagSocAzienda} onChange={v => setAzienda(p => ({ ...p, RagSocAzienda: v }))} />
+                <Campo label="PRGAZIENDA" value={azienda.PRGAZIENDA} onChange={v => setAzienda(p => ({ ...p, PRGAZIENDA: v }))} />
+                <Campo label="CF rappresentante firmatario" value={azienda.CFRappresentanteFirmatario} onChange={v => setAzienda(p => ({ ...p, CFRappresentanteFirmatario: v }))} />
+                <Campo label="ISTAT" value={azienda.ISTAT} onChange={v => setAzienda(p => ({ ...p, ISTAT: v }))} placeholder="841110" />
+                <Campo label="Forma giuridica" value={azienda.FormaGiuridica} onChange={v => setAzienda(p => ({ ...p, FormaGiuridica: v }))} placeholder="2430" />
+              </div>
+              <p className="text-xs text-gray-500 mt-2 max-w-3xl">
+                Se lasciata in bianco, l&apos;intestazione non viene scritta nel JSON e il builder conserva
+                quella già caricata.
+              </p>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
+  );
+}
+
+function CampoTesto({ value, onChange, placeholder = '', width = 'w-full' }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  width?: string;
+}) {
+  return (
+    <input
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      className={`${width} border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500`}
+    />
+  );
+}
+
+function Campo({ label, value, onChange, placeholder = '' }: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-gray-500 mb-0.5">{label}</span>
+      <CampoTesto value={value} onChange={onChange} placeholder={placeholder} />
+    </label>
   );
 }

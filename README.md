@@ -51,13 +51,61 @@ La causale la sceglie l'operatore — non è derivabile dal file. **C1** aggiung
 al dichiarato (esce con inquadramento e periodo, senza importi: il denaro nuovo
 non è nel file), **C5** lo sostituisce, **C6** lo cancella (solo date).
 
-Regole di aggregazione applicate al C5:
+### Dati che il file INPS non contiene
 
-| periodo | quadro | enti versanti |
-|---|---|---|
-| dal 10/2012 | uno per mese | una terna per ogni mese di pagamento **diverso** dal mese di competenza; se il pagamento cade nel mese stesso, nessuno |
-| fino al 09/2012, anno **con** V1C1 | anno intero, mai spezzato | una terna per **ciascun** mese di pagamento |
-| fino al 09/2012, anno **senza** V1C1 | cumulato | nessuno |
+Il tracciato PASSWEB non porta l'anagrafica del lavoratore né l'intestazione
+della denuncia, ma l'XML non può farne a meno: `Cognome` e `Nome` sono
+obbligatori e il frontespizio è tutto il blocco `DatiMittente` / `Azienda`. Il
+pannello **Dati per il builder**, sotto il pulsante di export, li raccoglie.
+
+Valgono **solo per il file .json**: l'export .xlsx resta la trascrizione fedele
+del file INPS e non ne è toccato.
+
+Cognome e nome mancanti non bloccano l'export — il JSON esce comunque, con
+l'avviso dentro `_avvisi` — ma il builder non produrrà un XML valido. Il
+frontespizio lasciato in bianco non viene scritto nel JSON, così il builder
+conserva quello che ha già caricato; l'ente si può riprendere dal file, che lo
+conosce dalla colonna del dichiarante.
+
+### Cumulo manuale (colonna ∑)
+
+Tutti i pagamenti successivi alla cessazione vanno sommati all'**ultimo mese
+lavorato**. Ma distinguere un E0 fuori posto — un errore del comune — da una
+riassunzione, per esempio uno stagionale, non è deducibile dal file: lo decide
+l'operatore.
+
+Nella tabella ogni riga ha una casella nella colonna **∑**. Le righe spuntate
+confluiscono in un **unico V1C5**: periodo di riferimento quello della riga che
+porta il codice cessazione (in mancanza, la più antica fra le scelte), importi
+sommati, e un ente versante per ogni mese di pagamento diverso dal riferimento.
+Vale solo per la causale 5; il cumulo finisce in `_avvisi` con l'elenco delle
+righe di origine.
+
+Regole di aggregazione automatiche, per le righe non spuntate:
+
+| periodo | quadro |
+|---|---|
+| dal 10/2012 | uno per mese |
+| fino al 09/2012, anno **con** V1C1 | anno intero, mai spezzato |
+| fino al 09/2012, anno **senza** V1C1 | cumulato |
+
+L'aggregazione riguarda il **quadro**. Gli enti versanti seguono una regola
+sola e valida sempre: **una terna per ciascun mese di pagamento**, compreso il
+mese di competenza. La somma delle terne deve ricostruire per intero gli
+imponibili dichiarati — i controlli INPS 00171I e 00032I sono bidirezionali e
+contestano tanto l'eccesso quanto il residuo. Le versioni precedenti
+omettevano la terna quando il pagamento cadeva nel mese del quadro, e non ne
+emettevano affatto sugli anni cumulati senza V1C1: entrambe le regole si sono
+rivelate sbagliate sui flussi realmente accettati da INPS.
+
+La terna di fine servizio è **TC7 in regime TFS e TC8 in regime TFR**: sono
+gestioni distinte e la congruità le confronta separate.
+
+L'imponibile del Fondo Credito si legge da `Imponibile Credito` oppure, sulle
+righe più vecchie che usano l'altro tracciato, da `Imponibile Credito/ENPDEP`;
+se non c'è né l'una né l'altra rispecchia l'imponibile pensionistico, perché è
+su quello che il Fondo Credito insiste e senza `ImpCredito` il builder non
+emette `GestCredito`.
 
 `AnnoMeseErogazione` è valorizzato dalla colonna `Denuncia`. È il mese di
 trasmissione, che sugli arretrati coincide con quello di erogazione ma non è la
