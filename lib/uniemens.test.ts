@@ -5,7 +5,8 @@ import { buildUniemensPayload, codeToken, parseEnte, toIsoDate, toItalian } from
 const COLUMNS = [
   'Codice fiscale', 'Data Inizio Periodo', 'Data Fine Periodo', 'Tipologia',
   'Tipo impiego', 'Tipo Servizio', 'Contratto', 'Qualifica',
-  'Percentuale part time', 'Imponibile', 'Totale Contributi',
+  'Tipo PART TIME', 'Percentuale part time', 'Regime fine servizio',
+  'Imponibile', 'Totale Contributi', 'Codice Motivo Cessazione',
   'Ente Dichiarante in Anagrafica', 'Causale Variazione', 'Denuncia',
 ];
 
@@ -252,6 +253,101 @@ describe('anni ante 10/2012 con V1C1', () => {
     const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
     expect(q.enteVersante).toHaveLength(0);
     expect(q.ImpCPDEL).toBe('2000,00');
+  });
+});
+
+describe('cumulo manuale sui pagamenti post cessazione', () => {
+  /* Ultimo mese lavorato 08/2020 con cessazione, tre arretrati sullo stesso
+     periodo pagati dopo, più un E0 di 10/2024 che è un errore del comune. */
+  const caso = () => [
+    row(5, {
+      'Codice fiscale': 'LNEGPP53M09F943M', 'Data Inizio Periodo': '01/10/2024', 'Data Fine Periodo': '31/10/2024',
+      'Denuncia': '2024 - Ottobre', 'Tipologia': 'E0',
+      'Tipo impiego': '1  - Contratto a tempo indeterminato (tempo pieno)', 'Tipo Servizio': '4 - Servizio ordinario',
+      'Contratto': 'RALN - REGIONI', 'Qualifica': '037492',
+      'Imponibile': '1276.17', 'Totale Contributi': '416.67',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+    row(6, {
+      'Codice fiscale': 'LNEGPP53M09F943M', 'Data Inizio Periodo': '01/08/2020', 'Data Fine Periodo': '31/08/2020',
+      'Denuncia': '2020 - Agosto', 'Tipologia': 'E0', 'Codice Motivo Cessazione': '3 Limiti di eta',
+      'Tipo impiego': '1  - Contratto a tempo indeterminato (tempo pieno)', 'Tipo Servizio': '4 - Servizio ordinario',
+      'Contratto': 'RALN - REGIONI', 'Qualifica': '037492', 'Regime fine servizio': '3',
+      'Imponibile': '2888.90', 'Totale Contributi': '943.23',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+    row(7, {
+      'Codice fiscale': 'LNEGPP53M09F943M', 'Data Inizio Periodo': '01/08/2020', 'Data Fine Periodo': '31/08/2020',
+      'Denuncia': '2020 - Settembre', 'Tipologia': 'V1', 'Causale Variazione': '1',
+      'Tipo impiego': '1  - Contratto a tempo indeterminato (tempo pieno)', 'Tipo Servizio': '4 - Servizio ordinario',
+      'Contratto': 'RALN - REGIONI', 'Qualifica': '037492',
+      'Imponibile': '721.48', 'Totale Contributi': '235.56',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+    row(8, {
+      'Codice fiscale': 'LNEGPP53M09F943M', 'Data Inizio Periodo': '01/08/2020', 'Data Fine Periodo': '31/08/2020',
+      'Denuncia': '2022 - Dicembre', 'Tipologia': 'V1', 'Causale Variazione': '1',
+      'Tipo impiego': '1  - Contratto a tempo indeterminato (tempo pieno)', 'Tipo Servizio': '4 - Servizio ordinario',
+      'Contratto': 'RALN - REGIONI', 'Qualifica': '037492',
+      'Imponibile': '131.18', 'Totale Contributi': '42.83',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+  ];
+  const tutte = new Set([5, 6, 7, 8]);
+
+  it('produce un solo quadro sul periodo della riga con la cessazione', () => {
+    const rows = caso();
+    const periodi = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte).dipendenti[0].periodi;
+    expect(periodi).toHaveLength(1);
+    expect(periodi[0].GiornoInizio).toBe('2020-08-01');
+    expect(periodi[0].GiornoFine).toBe('2020-08-31');
+    expect(periodi[0].CodiceCessazione).toBe('3');
+  });
+
+  it('somma tutti gli importi, compreso l\'E0 fuori posto', () => {
+    const rows = caso();
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte).dipendenti[0].periodi[0];
+    expect(q.ImpCPDEL).toBe('5017,73');   // 2888,90 + 721,48 + 131,18 + 1276,17
+    expect(q._righeOrigine.slice().sort((a, b) => a - b)).toEqual([5, 6, 7, 8]);
+  });
+
+  it('un ente versante per ogni mese di pagamento diverso dal riferimento', () => {
+    const rows = caso();
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte).dipendenti[0].periodi[0];
+    const mesi = Array.from(new Set(q.enteVersante.map(e => e.AnnoMeseErogazione))).sort();
+    expect(mesi).toEqual(['2020-09', '2022-12', '2024-10']);   // 2020-08 = riferimento, escluso
+  });
+
+  it('senza selezione restano quadri separati', () => {
+    const rows = caso();
+    const periodi = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi;
+    expect(periodi.length).toBeGreaterThan(1);
+  });
+
+  it('il cumulo vale solo per la causale 5', () => {
+    const rows = caso();
+    const periodi = buildUniemensPayload(rows, sheet(rows), COLS, '1', tutte).dipendenti[0].periodi;
+    expect(periodi.length).toBeGreaterThan(1);
+  });
+
+  it('registra il cumulo negli avvisi', () => {
+    const rows = caso();
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte);
+    expect(p._avvisi.join(' ')).toContain('cumulate a mano');
+  });
+
+  it('senza riga di cessazione usa il periodo più antico', () => {
+    const rows = caso().filter(r => r.__id !== 6);
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5', new Set([5, 7, 8])).dipendenti[0].periodi[0];
+    expect(q.GiornoInizio).toBe('2020-08-01');
+  });
+
+  it('riporta contratto e regime fine servizio, non più assenti', () => {
+    const rows = caso();
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte).dipendenti[0].periodi[0];
+    expect(q.Contratto).toBe('RALN');
+    expect(q.RegimeFineServizio).toBe('3');
+    expect(Object.keys(q)).toContain('TipoPartTime');
   });
 });
 

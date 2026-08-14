@@ -311,6 +311,8 @@ interface Block {
   rows: InpsRow[];
   /** Enti versanti per mese di pagamento: anni ante 10/2012 che contengono un V1C1. */
   evPerMesePagamento: boolean;
+  /** Riga di riferimento quando il blocco nasce da una cumulazione manuale. */
+  cumuloManuale?: InpsRow;
 }
 
 /** Terna TC1 / TC9 / TC7 per un insieme di righe. */
@@ -373,11 +375,37 @@ function enteVersantePerMesePagamento(
   return out;
 }
 
+/**
+ * Periodo di riferimento di una cumulazione manuale: l'ultimo mese lavorato,
+ * cioè la riga che porta un codice motivo cessazione. In mancanza, la più
+ * antica fra quelle scelte.
+ */
+export function riferimentoCumulo(
+  rows: readonly InpsRow[],
+  cols: QuadriColumns,
+): InpsRow | null {
+  if (rows.length === 0) return null;
+  const conCessazione = rows.filter(r => {
+    const c = codeToken(textOf(r, cols.cessazione));
+    return c !== '' && c !== '0';
+  });
+  const candidati = conCessazione.length > 0 ? conCessazione : rows;
+  return candidati.reduce((best, r) =>
+    toIsoDate(textOf(r, cols.data)) < toIsoDate(textOf(best, cols.data)) ? r : best);
+}
+
 export function buildUniemensPayload(
   rows: readonly InpsRow[],
   sheet: SheetData,
   cols: QuadriColumns,
   causale: Causale,
+  /**
+   * Righe da fondere in un unico quadro, indicate a mano dall'operatore.
+   * Serve per i pagamenti successivi alla cessazione, che vanno tutti sommati
+   * all'ultimo mese lavorato: distinguere un E0 sbagliato da una riassunzione
+   * (gli stagionali) non è deducibile dal file, quindi lo dice l'operatore.
+   */
+  cumula: ReadonlySet<number> = new Set(),
 ): BuilderPayload {
   counter = 0;
   const m = mapColumns(sheet.columns);
@@ -418,10 +446,31 @@ export function buildUniemensPayload(
       if (isV1 && codeToken(textOf(row, m.causale)) === '1') anniConC1.add(periodKey);
     }
 
+    // Righe marcate a mano: un unico blocco, riferimento all'ultimo mese
+    // lavorato. Tutto il resto segue le regole automatiche.
+    const daCumulare = causale === '5' ? ordered.filter(r => cumula.has(r.__id)) : [];
+    const restanti = daCumulare.length > 0 ? ordered.filter(r => !cumula.has(r.__id)) : ordered;
+
     // Un blocco nuovo inizia quando cambia il periodo oppure l'inquadramento.
     const blocks: Block[] = [];
     let current: Block | null = null;
-    for (const row of ordered) {
+
+    if (daCumulare.length > 0) {
+      const rif = riferimentoCumulo(daCumulare, cols)!;
+      const periodKey = periodKeyOf(rif, cols.data) ?? 'M';
+      blocks.push({
+        periodKey,
+        monoMese: true,
+        inq: inquadramentoOf(rif, m),
+        rows: daCumulare,
+        evPerMesePagamento: false,
+        cumuloManuale: rif,
+      });
+      const mesi = Array.from(new Set(daCumulare.map(r => textOf(r, m.denuncia)).filter(Boolean)));
+      avvisi.push(`${cf}: ${daCumulare.length} righe cumulate a mano su ${toIsoDate(textOf(rif, cols.data))} (righe ${daCumulare.map(r => r.__id).join(', ')}; pagamenti ${mesi.join(', ')}).`);
+    }
+
+    for (const row of restanti) {
       const periodKey = periodKeyOf(row, cols.data);
       if (!periodKey) {
         avvisi.push(`Riga ${row.__id}: data inizio periodo non interpretabile, esclusa.`);
@@ -459,14 +508,23 @@ export function buildUniemensPayload(
       const blockRows = block.rows;
       const monoMese = block.monoMese;
       // Estremi effettivi del blocco.
-      const starts = blockRows.map(r => toIsoDate(textOf(r, cols.data))).filter(Boolean).sort();
-      const ends = blockRows.map(r => toIsoDate(textOf(r, cols.dataFine))).filter(Boolean).sort();
-      const giornoInizio = starts[0] ?? '';
-      const giornoFine = ends[ends.length - 1] ?? '';
+      let giornoInizio: string;
+      let giornoFine: string;
+      if (block.cumuloManuale) {
+        // Il periodo è quello della riga di riferimento: le altre confluiscono
+        // come importi, non come estensione del periodo.
+        giornoInizio = toIsoDate(textOf(block.cumuloManuale, cols.data));
+        giornoFine = toIsoDate(textOf(block.cumuloManuale, cols.dataFine));
+      } else {
+        const starts = blockRows.map(r => toIsoDate(textOf(r, cols.data))).filter(Boolean).sort();
+        const ends = blockRows.map(r => toIsoDate(textOf(r, cols.dataFine))).filter(Boolean).sort();
+        giornoInizio = starts[0] ?? '';
+        giornoFine = ends[ends.length - 1] ?? '';
+      }
 
       // Inquadramento: quello del blocco, omogeneo per costruzione. Gli altri
       // campi vengono dall'ultima riga del blocco.
-      const ref = blockRows[blockRows.length - 1];
+      const ref = block.cumuloManuale ?? blockRows[blockRows.length - 1];
       const inq = block.inq;
       const ente = parseEnte(textOf(ref, m.ente));
       if (block.evPerMesePagamento) {
@@ -504,12 +562,14 @@ export function buildUniemensPayload(
         GiornoFine: giornoFine,
         TipoImpiego: isC6 ? '' : tipoImpiego,
         TipoServizio: isC6 ? '' : inq.tipoServizio,
-        Contratto: isC6 ? '' : inq.contratto,
         Qualifica: isC6 ? '' : inq.qualifica,
-        hasPartTime: !isC6 && (tipoImpiego === '8' || tipoImpiego === '18'),
-        TipoPartTime: isC6 ? '' : inq.tipoPartTime,
         PercPartTime: isC6 ? '' : inq.percPartTime,
-        RegimeFineServizio: isC6 ? '' : inq.regimeFineServizio,
+        // Non fanno parte dei criteri di spezzatura: si leggono dalla riga di
+        // riferimento, non dall'inquadramento del blocco.
+        Contratto: isC6 ? '' : codeToken(textOf(ref, m.contratto)),
+        TipoPartTime: isC6 ? '' : codeToken(textOf(ref, m.tipoPartTime)),
+        RegimeFineServizio: isC6 ? '' : codeToken(textOf(ref, m.regimeFineServizio)),
+        hasPartTime: !isC6 && (tipoImpiego === '8' || tipoImpiego === '18'),
         GiorniUtiliFiniPensionistici: isC6 ? '' : textOf(ref, m.giorniUtili),
         // C1 aggiunge denaro nuovo, che nel file non c'è: importi vuoti.
         ImpCPDEL: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.imponibile)),
@@ -547,6 +607,9 @@ export function buildUniemensPayload(
 
       periodi.push(periodo);
     }
+
+    // Il blocco cumulato viene creato per primo: si riordina cronologicamente.
+    periodi.sort((a, b) => (a.GiornoInizio < b.GiornoInizio ? -1 : a.GiornoInizio > b.GiornoInizio ? 1 : 0));
 
     dipendenti.push({
       id: uid(),
