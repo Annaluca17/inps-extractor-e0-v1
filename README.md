@@ -131,6 +131,29 @@ cosa finisce in `_avvisi`.
 Ogni quadro porta `_righeOrigine` con i numeri di riga del file INPS. Le
 incongruenze finiscono in `_avvisi` dentro il JSON, non nell'interfaccia.
 
+## La tabella come strumento di lavoro
+
+Il pannello **Selezione colonne** si richiude: dopo la scelta iniziale occupa
+quasi 400 pixel che servono ai dati, e l'intestazione continua a dire quante
+colonne sono attive. Lo stato aperto o chiuso resta memorizzato.
+
+La tabella ha un **schermo intero** (ESC per uscire) e il numero di righe per
+pagina è regolabile fino a mostrarle tutte: sui file da un dipendente, che sono
+il caso normale, si vede l'intero periodo senza cambiare pagina.
+
+Le colonne **∑** e **Riga** restano bloccate a sinistra durante lo scorrimento
+orizzontale: con ottanta colonne attive, la casella da spuntare sarebbe
+altrimenti la prima cosa a sparire proprio mentre si leggono gli importi.
+
+Spuntando le righe nella colonna ∑, una barra mostra i **totali delle righe
+selezionate** — imponibile, contributi, TFS/TFR, credito — che è la somma che
+prima si faceva a parte in Excel.
+
+Le spunte sopravvivono al cambio dei filtri, ma nell'export finiscono solo le
+righe ancora selezionate. Quando qualcuna resta fuori dai filtri attuali viene
+detto esplicitamente, con il conteggio: il totale mostrato è sempre quello che
+uscirà davvero.
+
 ## Filtri sulle intestazioni
 
 Ogni intestazione della tabella ha un imbuto (▼) che apre l'elenco dei valori

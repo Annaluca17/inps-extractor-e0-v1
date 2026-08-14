@@ -12,6 +12,7 @@
  */
 
 const COLUMN_PRESET_KEY = 'inps-extractor.colonne-predefinite.v1';
+const FLAG_PREFIX = 'inps-extractor.flag.';
 
 function storage(): Storage | null {
   if (typeof window === 'undefined') return null;
@@ -58,6 +59,32 @@ export function clearColumnPreset(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Preferenze di sola interfaccia (pannelli aperti o chiusi, righe per pagina).
+ * Non descrivono i dati, quindi un valore illeggibile non è un problema: si
+ * ricade sul default senza disturbare l'operatore.
+ */
+export function loadFlag(name: string, fallback: boolean): boolean {
+  const store = storage();
+  if (!store) return fallback;
+  try {
+    const raw = store.getItem(FLAG_PREFIX + name);
+    return raw === null ? fallback : raw === '1';
+  } catch {
+    return fallback;
+  }
+}
+
+export function saveFlag(name: string, value: boolean): void {
+  const store = storage();
+  if (!store) return;
+  try {
+    store.setItem(FLAG_PREFIX + name, value ? '1' : '0');
+  } catch {
+    // Preferenza non memorizzabile: l'app funziona lo stesso.
   }
 }
 

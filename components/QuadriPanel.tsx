@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   type ExportRow,
   type SheetData,
@@ -21,6 +21,7 @@ import {
   formatYearMonth,
   groupByYearWithSubtotals,
   nonEmptyColumns,
+  numberOf,
   resolveQuadriColumns,
   sortByPeriod,
   textOf,
@@ -30,8 +31,10 @@ import {
   clearColumnPreset,
   initialColumnSelection,
   loadColumnPreset,
+  loadFlag,
   missingPresetColumns,
   saveColumnPreset,
+  saveFlag,
 } from '../lib/preferences';
 import {
   type AnagraficaDipendente,
@@ -49,7 +52,7 @@ import {
   toIsoDate,
 } from '../lib/uniemens';
 import ColumnFilterPanel from './ColumnFilterPanel';
-import { Alert, Card, Chip, ResetChip, formatInt } from './ui';
+import { Alert, Card, Chip, ResetChip, formatInt, formatNumber } from './ui';
 
 const STATI_NOTI = ['Corrente', 'Spento', 'Obsoleto', 'Annullato'];
 const PAGE_SIZE = 50;
@@ -162,10 +165,16 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
     }
   }, [groupingActive, keptRows, visibleCols, cols]);
 
+  // A schermo intero la tabella è lo strumento di lavoro: si guardano tutte le
+  // righe del dipendente in una volta, senza rimbalzare fra le pagine.
+  const [fullscreen, setFullscreen] = useState(false);
+  const [pageSize, setPageSize] = useState<number>(PAGE_SIZE);
+
   const entries = displayed.ok ? displayed.value : [];
-  const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  const effectivePageSize = pageSize === 0 ? Math.max(entries.length, 1) : pageSize;
+  const totalPages = Math.max(1, Math.ceil(entries.length / effectivePageSize));
   const safePage = Math.min(page, totalPages - 1);
-  const pageEntries = entries.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+  const pageEntries = entries.slice(safePage * effectivePageSize, (safePage + 1) * effectivePageSize);
 
   const [exportError, setExportError] = useState<string>('');
   const [causale, setCausale] = useState<Causale>('5');
@@ -182,6 +191,45 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
 
   const righeCumulate = useMemo(() => keptRows.filter(r => cumula.has(r.__id)), [keptRows, cumula]);
   const rifCumulo = useMemo(() => riferimentoCumulo(righeCumulate, cols), [righeCumulate, cols]);
+
+  // Le spunte sopravvivono ai cambi di filtro, ma nell'export finiscono solo le
+  // righe ancora selezionate. Il conteggio deve dire la verità su ciò che uscirà
+  // davvero, non su quante caselle sono state toccate: un numero che torna su un
+  // contenuto diverso è esattamente l'errore che l'app esiste per rendere
+  // impossibile.
+  const cumulaFuoriVista = cumula.size - righeCumulate.length;
+
+  /** Totali delle righe spuntate: la somma che prima si faceva in Excel. */
+  const totaliCumulo = useMemo(() => {
+    const numeriche = SUBTOTAL_COLUMNS.filter(c => sheet.columns.includes(c));
+    return numeriche
+      .map(col => ({
+        col,
+        totale: righeCumulate.reduce((s, r) => s + (numberOf(r, col) ?? 0), 0),
+      }))
+      .filter(x => x.totale !== 0);
+  }, [righeCumulate, sheet]);
+
+  // Pannello colonne richiudibile: dopo la scelta iniziale è ingombro, e
+  // l'intestazione continua a dire quante ne sono attive.
+  const [colonneAperte, setColonneAperte] = useState(() => loadFlag('colonne-aperte', true));
+  const toggleColonne = () => setColonneAperte(prev => {
+    saveFlag('colonne-aperte', !prev);
+    return !prev;
+  });
+
+  // A schermo intero: ESC per uscire, e la pagina sotto non deve scorrere.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [fullscreen]);
 
   // Dati che il tracciato PASSWEB non contiene e che l'XML pretende. Valgono
   // solo per l'export JSON: l'XLSX resta la trascrizione fedele del file INPS.
@@ -481,7 +529,17 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
       )}
 
       <Card
-        title="Selezione colonne"
+        title={
+          <button
+            type="button"
+            onClick={toggleColonne}
+            className="flex items-center gap-2 hover:text-blue-700"
+            aria-expanded={colonneAperte}
+          >
+            <span className="text-gray-400">{colonneAperte ? '▾' : '▸'}</span>
+            Selezione colonne
+          </button>
+        }
         right={
           <span className="text-sm font-medium tabular-nums">
             <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
@@ -490,9 +548,20 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
             <span className="ml-2 bg-gray-100 text-gray-600 px-3 py-1 rounded-full">
               {sheet.columns.length - withData.length} senza dati
             </span>
+            {!colonneAperte && (
+              <button type="button" onClick={toggleColonne} className="ml-2 text-blue-700 underline text-xs">
+                apri
+              </button>
+            )}
           </span>
         }
       >
+        {!colonneAperte && (
+          <p className="text-sm text-gray-500">
+            Pannello chiuso. Le {activeColumns.size} colonne attive restano quelle scelte.
+          </p>
+        )}
+        {colonneAperte && <>
         {presetMissing.length > 0 && (
           <div className="mb-3">
             <Alert tone="warning" title="Colonne predefinite non presenti in questo file">
@@ -588,9 +657,72 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
           Le predefinite (&#128204;) restano attive a ogni caricamento, anche se nel file sono vuote.
           Nel file esportato l&apos;intestazione è la sigla breve quando esiste, per non avere colonne più larghe del dato.
         </p>
+        </>}
       </Card>
 
-      <div className="bg-white rounded-xl shadow overflow-hidden">
+      <div
+        className={fullscreen
+          ? 'fixed inset-0 z-50 bg-white flex flex-col'
+          : 'bg-white rounded-xl shadow overflow-hidden'}
+        // Il contenitore esterno usa space-y, che dà un margine superiore ai
+        // figli: con inset-0 sposterebbe in basso lo schermo intero.
+        style={fullscreen ? { marginTop: 0 } : undefined}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2 border-b border-gray-100 bg-gray-50">
+          <div className="flex items-center gap-3 text-sm">
+            <button
+              type="button"
+              onClick={() => setFullscreen(v => !v)}
+              className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-100 font-medium"
+              title={fullscreen ? 'Esci (o premi ESC)' : 'Lavora a schermo intero'}
+            >
+              {fullscreen ? '⤡ Esci da schermo intero' : '⤢ Schermo intero'}
+            </button>
+            {fullscreen && <span className="text-xs text-gray-400">ESC per uscire</span>}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            Righe per pagina
+            <select
+              value={pageSize}
+              onChange={e => { setPageSize(Number(e.target.value)); setPage(0); }}
+              className="border border-gray-300 rounded px-2 py-1 text-sm bg-white"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+              <option value={0}>tutte</option>
+            </select>
+          </label>
+        </div>
+
+        {/* Va mostrato anche quando nessuna riga spuntata rientra nei filtri:
+            è lì che l'avviso serve di più, non dove è superfluo. */}
+        {(righeCumulate.length > 0 || cumulaFuoriVista > 0) && (
+          <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-sm">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="font-semibold text-amber-900">
+                &#8721; {righeCumulate.length} righe selezionate
+              </span>
+              {totaliCumulo.map(({ col, totale }) => (
+                <span key={col} className="text-amber-900 tabular-nums">
+                  {E0V1_MAP[col] ?? col}: <span className="font-semibold">{formatNumber(totale)}</span>
+                </span>
+              ))}
+              <button
+                type="button"
+                onClick={() => setCumula(new Set())}
+                className="underline text-amber-700 hover:text-amber-900"
+              >azzera</button>
+            </div>
+            {cumulaFuoriVista > 0 && (
+              <p className="text-xs text-amber-700 mt-1">
+                Altre {cumulaFuoriVista} righe spuntate non rientrano nei filtri attuali: non sono in questi
+                totali e non finiranno nell&apos;export.
+              </p>
+            )}
+          </div>
+        )}
+
         {(columnFilters.size > 0 || openFilter) && (
           <div className="p-4 pb-0">
             {columnFilters.size > 0 && (
@@ -628,12 +760,18 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
           </div>
         )}
 
-        <div className="overflow-x-auto max-h-[60vh]">
-          <table className="min-w-full text-sm">
-            <thead className="bg-blue-700 text-white sticky top-0">
+        <div className={fullscreen ? 'overflow-auto flex-1' : 'overflow-auto max-h-[60vh]'}>
+          <table className="min-w-full text-sm border-separate border-spacing-0">
+            <thead className="bg-blue-700 text-white sticky top-0 z-20">
               <tr>
-                <th className="px-2 py-2 text-center whitespace-nowrap" title="Righe da cumulare in un unico V1C5">&#8721;</th>
-                <th className="px-3 py-2 text-left whitespace-nowrap" title="Riga nel file INPS di origine">Riga</th>
+                <th
+                  className="px-2 py-2 text-center whitespace-nowrap sticky left-0 z-30 bg-blue-700 w-10"
+                  title="Righe da cumulare in un unico V1C5"
+                >&#8721;</th>
+                <th
+                  className="px-3 py-2 text-left whitespace-nowrap sticky left-10 z-30 bg-blue-700"
+                  title="Riga nel file INPS di origine"
+                >Riga</th>
                 {visibleCols.map(col => {
                   const filtered = columnFilters.has(col);
                   return (
@@ -664,24 +802,28 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               {pageEntries.map((entry, i) => {
                 const isSub = entry.kind === 'subtotal';
                 const key = isSub ? `sub-${entry.year}` : `row-${entry.row!.__id}`;
+                const spuntata = !isSub && cumula.has(entry.row!.__id);
+                // Le celle bloccate non ereditano lo sfondo della riga: se
+                // resta trasparente, il contenuto che scorre le attraversa.
+                const sfondo = isSub
+                  ? 'bg-amber-50'
+                  : spuntata ? 'bg-amber-100' : (i % 2 === 0 ? 'bg-white' : 'bg-gray-50');
                 return (
                   <tr
                     key={key}
-                    className={isSub
-                      ? 'bg-amber-50 font-semibold border-t-2 border-amber-300'
-                      : (i % 2 === 0 ? 'bg-white' : 'bg-gray-50')}
+                    className={`${sfondo} ${isSub ? 'font-semibold' : ''}`}
                   >
-                    <td className="px-2 py-1 border-b border-gray-100 text-center">
+                    <td className={`px-2 py-1 border-b border-gray-100 text-center sticky left-0 z-10 ${sfondo}`}>
                       {!isSub && (
                         <input
                           type="checkbox"
-                          checked={cumula.has(entry.row!.__id)}
+                          checked={spuntata}
                           onChange={() => toggleCumula(entry.row!.__id)}
                           title="Cumula questa riga nel V1C5"
                         />
                       )}
                     </td>
-                    <td className="px-3 py-1 border-b border-gray-100 tabular-nums text-gray-400 whitespace-nowrap">
+                    <td className={`px-3 py-1 border-b border-gray-100 tabular-nums text-gray-400 whitespace-nowrap sticky left-10 z-10 ${sfondo}`}>
                       {isSub ? '' : entry.row!.__id}
                     </td>
                     {visibleCols.map(col => {
@@ -742,10 +884,10 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
               formula, aggiungendo o togliendo righe in Excel i totali si aggiornano da soli, e le righe nascoste
               dal filtro non vengono conteggiate.
             </p>
-            {cumula.size > 0 && (
+            {(righeCumulate.length > 0 || cumulaFuoriVista > 0) && (
               <div className="text-sm bg-amber-50 border border-amber-300 rounded-lg px-3 py-2 max-w-xl">
                 <span className="font-semibold text-amber-900">
-                  &#8721; {cumula.size} righe da cumulare in un unico V1C5
+                  &#8721; {righeCumulate.length} righe da cumulare in un unico V1C5
                 </span>
                 {rifCumulo && (
                   <span className="text-amber-800">
@@ -765,6 +907,11 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                   Importi sommati sul periodo di riferimento, un ente versante per ogni mese di pagamento.
                   Vale solo per la causale 5.
                 </p>
+                {cumulaFuoriVista > 0 && (
+                  <p className="text-xs text-amber-800 mt-1 font-medium">
+                    Altre {cumulaFuoriVista} righe spuntate sono fuori dai filtri attuali e non verranno esportate.
+                  </p>
+                )}
               </div>
             )}
           </div>
