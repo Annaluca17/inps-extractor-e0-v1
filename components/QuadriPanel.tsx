@@ -818,9 +818,16 @@ export default function QuadriPanel({ sheet }: { sheet: SheetData }) {
                 {visibleCols.map(col => {
                   const filtered = columnFilters.has(col);
                   return (
-                    <th key={col} className="px-3 py-2 text-left whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1">
-                        <span>{col}</span>
+                    // La colonna si dimensiona sul dato, non sul titolo: le
+                    // intestazioni del tracciato PASSWEB sono lunghissime
+                    // ("Retribuzione teoriaca tabellare TFR") e il valore sotto
+                    // è spesso un importo di cinque cifre. Il titolo va a capo
+                    // entro `max-w`, le celle no — date e importi non si
+                    // spezzano. Costa qualche riga di altezza in testata e
+                    // restituisce metà larghezza per colonna.
+                    <th key={col} className="px-3 py-2 text-left align-bottom">
+                      <span className="inline-flex items-start gap-1">
+                        <span className="whitespace-normal break-words leading-tight max-w-[8rem]">{col}</span>
                         <button
                           type="button"
                           onClick={() => setOpenFilter(prev => (prev === col ? null : col))}
