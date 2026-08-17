@@ -10,6 +10,8 @@ import {
   codiciFiscaliDi,
   parseEnte,
   percPartTimeOf,
+  regimeDaCodice,
+  statoSuperato,
   tipoPartTimeOf,
   toIsoDate,
   toItalian,
@@ -23,6 +25,8 @@ const COLUMNS = [
   'Imponibile TFS', 'Contributo TFS', 'Imponibile TFR', 'Contributo TFR',
   'Imponibile Credito/ENPDEP', 'Imponibile Credito', 'Contributo Credito',
   'Ente Dichiarante in Anagrafica', 'Causale Variazione', 'Denuncia',
+  'Correnti, obsoleti, …',
+  'Retribuzione teoriaca tabellare TFR', 'Retribuzione valutabile ai fini TFR',
 ];
 
 const COLS: QuadriColumns = {
@@ -73,6 +77,22 @@ describe('helper di conversione', () => {
     expect(codeToken('RALN - REGIONI AUTONOMIE LOCALI')).toBe('RALN');
     expect(codeToken('0IRCC1 ISTRUTTORI - EX C1')).toBe('0IRCC1');
     expect(codeToken('')).toBe('');
+  });
+
+  it('mappa il codice regime sulla gestione previdenziale', () => {
+    expect(regimeDaCodice('1')).toBe('TFR');
+    expect(regimeDaCodice('2')).toBe('TFR');
+    expect(regimeDaCodice('3 - TFS ex INADEL')).toBe('TFS');
+    expect(regimeDaCodice('')).toBeNull();
+    expect(regimeDaCodice('9')).toBeNull();
+  });
+
+  it('riconosce le righe superate dallo stato', () => {
+    expect(statoSuperato('Spento')).toBe(true);
+    expect(statoSuperato('obsoleto')).toBe(true);
+    expect(statoSuperato('Annullato')).toBe(true);
+    expect(statoSuperato('Corrente')).toBe(false);
+    expect(statoSuperato('')).toBe(false);
   });
 
   it('separa codice fiscale e progressivo dell\'ente', () => {
@@ -181,6 +201,63 @@ describe('terna di fine servizio', () => {
     expect(fs).toHaveLength(1);
     expect(fs[0].Imponibile).toBe('780,00');
     expect(fs[0].Imponibile).toBe(q.ImpTFS);
+  });
+});
+
+describe('regime di fine servizio: lo dichiara il file, non gli importi', () => {
+  it('il codice 3 tiene il quadro in TFS anche se ci sono importi TFR', () => {
+    const rows = [mese(1, '01/10/2020', '31/10/2020', {
+      'Regime fine servizio': '3',
+      'Imponibile TFS': '780.00', 'Contributo TFS': '47.58',
+      'Imponibile TFR': '51.74', 'Contributo TFR': '3.16',
+    })];
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5');
+    const q = p.dipendenti[0].periodi[0];
+    expect(q.RegimeFineServizio).toBe('3');
+    expect(q.regimeTFS).toBe('TFS');
+    expect(q.ImpTFS).toBe('780,00');
+    expect(q.enteVersante.filter(e => e.TipoContributo === '7')).toHaveLength(1);
+    expect(q.enteVersante.some(e => e.TipoContributo === '8')).toBe(false);
+  });
+
+  it('i codici 1 e 2 tengono il quadro in TFR anche senza importi TFR', () => {
+    for (const codice of ['1', '2']) {
+      const rows = [mese(1, '01/10/2020', '31/10/2020', { 'Regime fine servizio': codice })];
+      const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+      expect(q.regimeTFS).toBe('TFR');
+    }
+  });
+
+  it('avvisa quando l\'imponibile dell\'altro regime resta fuori', () => {
+    const rows = [mese(1, '01/10/2020', '31/10/2020', {
+      'Regime fine servizio': '3',
+      'Imponibile TFS': '780.00', 'Contributo TFS': '47.58',
+      'Imponibile TFR': '51.74', 'Contributo TFR': '3.16',
+    })];
+    const avvisi = buildUniemensPayload(rows, sheet(rows), COLS, '5')._avvisi.join(' ');
+    expect(avvisi).toContain('51,74 di imponibile TFR');
+    expect(avvisi).toContain('resta fuori');
+  });
+
+  it('senza codice ripiega sugli importi, come prima', () => {
+    const rows = [mese(1, '01/10/2020', '31/10/2020', { 'Imponibile TFR': '780.00', 'Contributo TFR': '47.58' })];
+    const q = buildUniemensPayload(rows, sheet(rows), COLS, '5').dipendenti[0].periodi[0];
+    expect(q.RegimeFineServizio).toBe('');
+    expect(q.regimeTFS).toBe('TFR');
+  });
+
+  it('spezza il periodo aggregato al passaggio TFS → TFR', () => {
+    const rows = [
+      mese(1, '01/01/2011', '31/01/2011', { 'Regime fine servizio': '3', 'Imponibile TFS': '100.00' }),
+      mese(2, '01/02/2011', '28/02/2011', { 'Regime fine servizio': '3', 'Imponibile TFS': '100.00' }),
+      mese(3, '01/03/2011', '31/03/2011', { 'Regime fine servizio': '1', 'Imponibile TFR': '100.00' }),
+    ];
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5');
+    const periodi = p.dipendenti[0].periodi;
+    expect(periodi).toHaveLength(2);
+    expect(periodi[0].regimeTFS).toBe('TFS');
+    expect(periodi[1].regimeTFS).toBe('TFR');
+    expect(p._avvisi.join(' ')).toContain('Regime fine servizio');
   });
 });
 
@@ -413,6 +490,73 @@ describe('cumulo manuale sui pagamenti post cessazione', () => {
     expect(q.Contratto).toBe('RALN');
     expect(q.RegimeFineServizio).toBe('3');
     expect(Object.keys(q)).toContain('TipoPartTime');
+  });
+});
+
+describe('cumulo che mescola una riga superata e la sua sostituta', () => {
+  /* Caso reale (Noto, GIUNTA): l'E0 del mese di cessazione è Spento in regime
+     TFS, il V1 che l'ha rifatto è Corrente in regime TFR. Stessa data, stesso
+     codice cessazione: solo lo stato distingue il dichiarato dal superato. */
+  const caso = () => [
+    row(10, {
+      'Codice fiscale': 'GNTFNC77B03I754J', 'Data Inizio Periodo': '01/03/2020', 'Data Fine Periodo': '15/03/2020',
+      'Denuncia': '2020 - Marzo', 'Tipologia': 'E0', 'Correnti, obsoleti, …': 'Spento',
+      'Codice Motivo Cessazione': '13', 'Regime fine servizio': '3',
+      'Tipo impiego': '1', 'Tipo Servizio': '4', 'Contratto': 'RALN', 'Qualifica': '042000',
+      'Imponibile': '1229.75', 'Totale Contributi': '401.51',
+      'Imponibile TFS': '966.89', 'Contributo TFS': '58.98',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+    row(11, {
+      'Codice fiscale': 'GNTFNC77B03I754J', 'Data Inizio Periodo': '01/03/2020', 'Data Fine Periodo': '15/03/2020',
+      'Denuncia': '2022 - Dicembre', 'Tipologia': 'V1', 'Causale Variazione': '1', 'Correnti, obsoleti, …': 'Corrente',
+      'Codice Motivo Cessazione': '13', 'Regime fine servizio': '1',
+      'Tipo impiego': '1', 'Tipo Servizio': '4', 'Contratto': 'RALN', 'Qualifica': '042000',
+      'Imponibile': '64.67', 'Totale Contributi': '21.11',
+      'Imponibile TFR': '51.74', 'Contributo TFR': '3.16',
+      'Retribuzione teoriaca tabellare TFR': '64.68', 'Retribuzione valutabile ai fini TFR': '64.68',
+      'Ente Dichiarante in Anagrafica': ENTE,
+    }),
+  ];
+  const tutte = new Set([10, 11]);
+  const build = () => {
+    const rows = caso();
+    return buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte);
+  };
+
+  it('prende il riferimento dalla riga Corrente, non da quella Spenta', () => {
+    const q = build().dipendenti[0].periodi[0];
+    expect(q.RegimeFineServizio).toBe('1');
+    expect(q.regimeTFS).toBe('TFR');
+  });
+
+  it('la gestione previdenziale non contraddice il regime dichiarato', () => {
+    const q = build().dipendenti[0].periodi[0];
+    // È l'incongruenza che il builder importava senza accorgersene: regime
+    // TFS nell'inquadramento e gestione TFR negli importi.
+    expect(regimeDaCodice(q.RegimeFineServizio)).toBe(q.regimeTFS);
+    expect(q.enteVersante.some(e => e.TipoContributo === '7')).toBe(false);
+    expect(q.enteVersante.filter(e => e.TipoContributo === '8')).toHaveLength(1);
+  });
+
+  it('avvisa dei due regimi e dell\'imponibile TFS che resta fuori', () => {
+    const avvisi = build()._avvisi.join(' ');
+    expect(avvisi).toContain('regimi di fine servizio diversi (3 | 1)');
+    expect(avvisi).toContain('966,89 di imponibile TFS');
+  });
+
+  it('la retribuzione teorica arriva anche se non è sulla riga di riferimento', () => {
+    const q = build().dipendenti[0].periodi[0];
+    expect(q.RetribTeoricaTabellareTFR).toBe('64,68');
+    expect(q.RetribValutabileTFR).toBe('64,68');
+  });
+
+  it('se ogni riga scelta è superata, lo dice', () => {
+    const rows = caso().map(r => r.__id === 11
+      ? row(11, { ...r.cells, 'Correnti, obsoleti, …': 'Obsoleto' })
+      : r);
+    const p = buildUniemensPayload(rows, sheet(rows), COLS, '5', tutte);
+    expect(p._avvisi.join(' ')).toContain('è "Spento"');
   });
 });
 

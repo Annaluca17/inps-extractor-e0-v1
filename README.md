@@ -99,6 +99,14 @@ sommati, e un ente versante per ogni mese di pagamento diverso dal riferimento.
 Vale solo per la causale 5; il cumulo finisce in `_avvisi` con l'elenco delle
 righe di origine.
 
+Fra le righe scelte il riferimento è preso fra quelle **non superate**: da lì il
+quadro copia inquadramento, regime e date, e quelli di una riga *Spenta* sono
+una dichiarazione già sostituita. Nel file PASSWEB l'E0 rifatto e il V1 che lo
+rifà hanno la stessa data e lo stesso codice cessazione — solo lo stato li
+distingue. I campi che il riferimento non porta vengono completati dalle altre
+righe scelte, prima le Correnti. Se ogni riga della selezione è superata il
+riferimento sarà per forza una di quelle, e `_avvisi` lo dice.
+
 Regole di aggregazione automatiche, per le righe non spuntate:
 
 | periodo | quadro |
@@ -118,6 +126,21 @@ rivelate sbagliate sui flussi realmente accettati da INPS.
 
 La terna di fine servizio è **TC7 in regime TFS e TC8 in regime TFR**: sono
 gestioni distinte e la congruità le confronta separate.
+
+Il regime è quello **dichiarato** nella colonna `Regime fine servizio` — `1` e
+`2` valgono TFR, `3` vale TFS — non quello dedotto da dove ci sono gli importi.
+Sono due cose diverse appena un blocco mescola righe di regime diverso, ed è
+frequente: il passaggio da TFS a TFR lascia nel file la vecchia riga *Spenta* in
+regime TFS accanto al V1 *Corrente* che l'ha rifatta in TFR. Dedurre il regime
+dagli importi produceva quadri in cui `RegimeFineServizio` diceva TFS e la
+gestione previdenziale TFR, con la terna emessa sulla gestione sbagliata e
+l'imponibile dell'altro regime scartato senza che si vedesse. Gli importi
+decidono solo dove il codice manca, cioè sulle righe ante 10/2012.
+
+Quando le righe di un quadro portano comunque due regimi — succede sul cumulo
+manuale e sugli anni riprodotti interi, dove la spezzatura non si applica — il
+quadro ne dichiara uno solo e `_avvisi` riporta sia i due codici sia
+l'imponibile dell'altro regime che resta fuori, con i numeri di riga.
 
 La **percentuale part-time** viene riscalata: il DMA2 la vuole come intero, cioè
 la percentuale con tre decimali e senza separatore — 66,67% si dichiara `66670`
@@ -141,6 +164,7 @@ I quadri aggregati si spezzano quando cambia l'inquadramento:
 | Tipo impiego | passaggio part-time ↔ tempo pieno |
 | Tipo Servizio | passaggio tempo determinato ↔ indeterminato |
 | Qualifica | progressione fra le aree |
+| Regime fine servizio | passaggio TFS ↔ TFR: sono gestioni previdenziali distinte, un quadro ne dichiara una sola e gli importi dell'altra non avrebbero dove andare |
 | Percentuale part-time | **solo dai periodi 2020 in poi**: prima le percentuali dichiarate erano spesso errate e spezzare produrrebbe frammentazione inutile |
 
 `Contratto` è escluso: vale sempre RALN, quindi non discrimina. Il confronto è

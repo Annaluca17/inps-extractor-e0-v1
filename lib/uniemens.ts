@@ -26,6 +26,15 @@
  * — La terna di fine servizio è TC7 in regime TFS e TC8 in regime TFR: sono
  *   gestioni distinte e il controllo di congruità le confronta separate.
  *
+ * — Il regime è quello DICHIARATO nella colonna `Regime fine servizio`, non
+ *   quello dedotto da dove ci sono gli importi. Sono due cose diverse quando un
+ *   blocco mescola righe di regime diverso — il caso tipico è il passaggio da
+ *   TFS a TFR — e dedurlo dagli importi produce quadri in cui
+ *   `RegimeFineServizio` dice una cosa e la gestione previdenziale un'altra,
+ *   con la terna emessa sulla gestione sbagliata e l'imponibile dell'altro
+ *   regime scartato in silenzio. Gli importi valgono solo come ripiego sulle
+ *   righe che il codice non ce l'hanno (ante 10/2012).
+ *
  * — La causale la sceglie l'operatore: non è derivabile dal file.
  *   C1 aggiunge al dichiarato, C5 lo sostituisce, C6 lo cancella.
  *
@@ -230,6 +239,31 @@ export function codiceCessazioneOf(value: string): string {
   return c === '0' ? '' : c;
 }
 
+/**
+ * Gestione previdenziale corrispondente al codice `Regime fine servizio`:
+ * 1 = TFR privatistico, 2 = TFR misto, 3 = TFS (ex INADEL). È la stessa
+ * corrispondenza che applica il builder quando l'operatore cambia il campo a
+ * mano. `null` quando il codice manca o non è riconosciuto: le righe ante
+ * 10/2012 non lo portano affatto.
+ */
+export function regimeDaCodice(value: string): 'TFS' | 'TFR' | null {
+  const c = codeToken(value);
+  if (c === '1' || c === '2') return 'TFR';
+  if (c === '3') return 'TFS';
+  return null;
+}
+
+/** Stati che dicono "questa riga è già stata sostituita da un'altra". */
+const STATI_SUPERATI = ['spento', 'obsoleto', 'annullato'];
+
+/**
+ * Riga superata: il suo contenuto non è più quello dichiarato a INPS. Prenderla
+ * a riferimento significa copiare l'inquadramento di una dichiarazione morta.
+ */
+export function statoSuperato(value: string): boolean {
+  return STATI_SUPERATI.includes(value.trim().toLowerCase());
+}
+
 /** "COMUNE DI NOTO 00195880893 00000" → CF azienda + progressivo. */
 export function parseEnte(value: string): { CFAzienda: string; PRGAZIENDA: string } {
   const m = value.trim().match(/([0-9]{11}|[A-Z0-9]{16})\s+([0-9]{5})\s*$/i);
@@ -368,13 +402,16 @@ function periodKeyOf(row: InpsRow, dateColumn: string | null): string | null {
  *   tipoImpiego  — passaggio part-time ↔ tempo pieno
  *   tipoServizio — passaggio tempo determinato ↔ indeterminato
  *   qualifica    — progressione fra le aree
+ *   regimeFineServizio — passaggio TFS ↔ TFR: sono gestioni previdenziali
+ *                  distinte, un quadro ne dichiara una sola e gli importi
+ *                  dell'altra non avrebbero dove andare
  *   percPartTime — ma solo dal 2020: prima le percentuali dichiarate dai comuni
  *                  erano spesso errate e spezzare produrrebbe frammentazione
  *                  inutile.
  * `contratto` è escluso: vale sempre RALN, quindi non discrimina nulla.
  * Il confronto è sui codici, non sulle descrizioni.
  */
-const INQ_FIELDS = ['tipoImpiego', 'tipoServizio', 'qualifica', 'percPartTime'] as const;
+const INQ_FIELDS = ['tipoImpiego', 'tipoServizio', 'qualifica', 'regimeFineServizio', 'percPartTime'] as const;
 
 /** Dal 2020 le variazioni di percentuale part-time sono attendibili. */
 export const ANNO_PART_TIME_ATTENDIBILE = 2020;
@@ -419,6 +456,7 @@ const INQ_LABEL: Record<string, string> = {
   tipoImpiego: 'Tipo impiego',
   tipoServizio: 'Tipo Servizio',
   qualifica: 'Qualifica',
+  regimeFineServizio: 'Regime fine servizio',
   percPartTime: 'Percentuale part time',
 };
 
@@ -504,14 +542,22 @@ function enteVersantePerMesePagamento(
  * Periodo di riferimento di una cumulazione manuale: l'ultimo mese lavorato,
  * cioè la riga che porta un codice motivo cessazione. In mancanza, la più
  * antica fra quelle scelte.
+ *
+ * Le righe superate (Spento / Obsoleto / Annullato) valgono solo se non c'è
+ * altro: dal riferimento il quadro copia inquadramento, regime e date, e
+ * quelli di una dichiarazione già sostituita non sono più il dichiarato. Il
+ * caso reale: la riga E0 Spenta in regime TFS accanto al V1 Corrente che l'ha
+ * rifatta in TFR — entrambe con lo stesso codice cessazione e la stessa data.
  */
 export function riferimentoCumulo(
   rows: readonly InpsRow[],
   cols: QuadriColumns,
 ): InpsRow | null {
   if (rows.length === 0) return null;
-  const conCessazione = rows.filter(r => codiceCessazioneOf(textOf(r, cols.cessazione)) !== '');
-  const candidati = conCessazione.length > 0 ? conCessazione : rows;
+  const vive = rows.filter(r => !statoSuperato(textOf(r, cols.stato)));
+  const base = vive.length > 0 ? vive : rows;
+  const conCessazione = base.filter(r => codiceCessazioneOf(textOf(r, cols.cessazione)) !== '');
+  const candidati = conCessazione.length > 0 ? conCessazione : base;
   return candidati.reduce((best, r) =>
     toIsoDate(textOf(r, cols.data)) < toIsoDate(textOf(best, cols.data)) ? r : best);
 }
@@ -590,15 +636,29 @@ export function buildUniemensPayload(
     if (daCumulare.length > 0) {
       const rif = riferimentoCumulo(daCumulare, cols)!;
       const periodKey = periodKeyOf(rif, cols.data) ?? 'M';
+      // Inquadramento del cumulo: quello del riferimento, completato dalle
+      // altre righe scelte per i campi che il riferimento non porta — gli
+      // arretrati ripetono di rado regime e qualifica. Le righe superate
+      // vengono per ultime: valgono solo dove non c'è nient'altro.
+      const perInquadramento = [
+        rif,
+        ...daCumulare.filter(r => r !== rif && !statoSuperato(textOf(r, cols.stato))),
+        ...daCumulare.filter(r => r !== rif && statoSuperato(textOf(r, cols.stato))),
+      ];
       blocks.push({
         periodKey,
-        inq: inquadramentoOf(rif, m),
+        inq: perInquadramento.map(r => inquadramentoOf(r, m)).reduce(inquadramentoUnione),
         rows: daCumulare,
         evPerMesePagamento: false,
         cumuloManuale: rif,
       });
       const mesi = Array.from(new Set(daCumulare.map(r => textOf(r, m.denuncia)).filter(Boolean)));
       avvisi.push(`${cf}: ${daCumulare.length} righe cumulate a mano su ${toIsoDate(textOf(rif, cols.data))} (righe ${daCumulare.map(r => r.__id).join(', ')}; pagamenti ${mesi.join(', ')}).`);
+      // Ci si arriva solo se ogni riga scelta è superata: il quadro copierebbe
+      // inquadramento e regime da una dichiarazione già sostituita.
+      if (statoSuperato(textOf(rif, cols.stato))) {
+        avvisi.push(`${cf}: la riga di riferimento del cumulo (${rif.__id}) è "${textOf(rif, cols.stato)}"; inquadramento, regime e date del quadro vengono da una dichiarazione già sostituita.`);
+      }
     }
 
     for (const row of restanti) {
@@ -680,7 +740,36 @@ export function buildUniemensPayload(
       }
       const impTFR = sum(blockRows, m.impTFR);
       const impTFSraw = sum(blockRows, m.impTFS);
-      const regimeTFS: 'TFS' | 'TFR' = (impTFR != null && impTFR !== 0) ? 'TFR' : 'TFS';
+
+      // Il regime lo dichiara il file. `inq.regimeFineServizio` è il codice del
+      // blocco: unico per costruzione, perché una variazione lo spezza. Gli
+      // importi decidono solo dove il codice non c'è (righe ante 10/2012).
+      const codiceRegime = inq.regimeFineServizio;
+      const regimeTFS: 'TFS' | 'TFR' =
+        regimeDaCodice(codiceRegime) ?? ((impTFR != null && impTFR !== 0) ? 'TFR' : 'TFS');
+
+      // Un blocco con due regimi resta possibile dove la spezzatura non si
+      // applica: cumulo manuale e anni riprodotti interi per la presenza di un
+      // V1C1. Il quadro ne dichiara uno solo, quindi va detto quale.
+      const codiciRegime = Array.from(new Set(
+        blockRows.map(r => codeToken(textOf(r, m.regimeFineServizio))).filter(Boolean),
+      ));
+      if (codiciRegime.length > 1) {
+        avvisi.push(`${cf} ${block.periodKey.slice(1)}: le righe portano regimi di fine servizio diversi (${codiciRegime.join(' | ')}); il quadro dichiara ${codiceRegime || '(nessuno)'} → ${regimeTFS}.`);
+      }
+
+      // Contropartita della scelta del regime: quanto sta nella colonna
+      // dell'altro non ha una gestione in cui finire e resterebbe fuori dal
+      // quadro e dalle terne senza che si veda.
+      const impScartato = regimeTFS === 'TFR' ? impTFSraw : impTFR;
+      if (impScartato != null && impScartato !== 0) {
+        const colonnaScartata = regimeTFS === 'TFR' ? 'TFS' : 'TFR';
+        const righeScartate = blockRows
+          .filter(r => numberOf(r, regimeTFS === 'TFR' ? m.impTFS : m.impTFR) != null)
+          .map(r => r.__id);
+        avvisi.push(`${cf} ${block.periodKey.slice(1)}: quadro in regime ${regimeTFS}, ma le righe ${righeScartate.join(', ')} portano ${toItalian(impScartato)} di imponibile ${colonnaScartata}; quell'importo resta fuori dal quadro e dalle terne.`);
+      }
+
       const tipoImpiego = inq.tipoImpiego;
 
       const periodo: BuilderPeriodo = {
@@ -698,7 +787,7 @@ export function buildUniemensPayload(
         // riferimento, non dall'inquadramento del blocco.
         Contratto: isC6 ? '' : codeToken(textOf(ref, m.contratto)),
         TipoPartTime: isC6 ? '' : tipoPartTimeOf(textOf(ref, m.tipoPartTime)),
-        RegimeFineServizio: isC6 ? '' : codeToken(textOf(ref, m.regimeFineServizio)),
+        RegimeFineServizio: isC6 ? '' : codiceRegime,
         hasPartTime: !isC6 && (tipoImpiego === '8' || tipoImpiego === '18'),
         GiorniUtiliFiniPensionistici: isC6 ? '' : textOf(ref, m.giorniUtili),
         // C1 aggiunge denaro nuovo, che nel file non c'è: importi vuoti.
@@ -711,7 +800,11 @@ export function buildUniemensPayload(
         regimeTFS,
         ImpTFS: isC6 || isC1 ? '' : toItalian(regimeTFS === 'TFR' ? impTFR : impTFSraw),
         ContribTFS: isC6 || isC1 ? '' : toItalian(sum(blockRows, regimeTFS === 'TFR' ? m.contribTFR : m.contribTFS)),
-        RetribTeoricaTabellareTFR: isC6 ? '' : toItalian(numberOf(ref, m.retribTeoricaTFR)),
+        // Sommata come la valutabile: sono due facce della stessa retribuzione
+        // del periodo dichiarato, e leggerne una dalla sola riga di riferimento
+        // la lasciava vuota ogni volta che il fine servizio stava su un'altra
+        // riga del blocco. Vuota, in regime TFR, è un quadro che INPS respinge.
+        RetribTeoricaTabellareTFR: isC6 ? '' : toItalian(sum(blockRows, m.retribTeoricaTFR)),
         ImponibileTFRUlterioriElem: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.ultElemTFR)),
         ContributoTFRUlterioriElem: isC6 || isC1 ? '' : toItalian(sum(blockRows, m.contribUltElemTFR)),
         RetribValutabileTFR: isC6 ? '' : toItalian(sum(blockRows, m.retribValutabileTFR)),
